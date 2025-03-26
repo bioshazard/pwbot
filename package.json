@@ -2,5 +2,13 @@
   "dependencies": {
     "@slack/bolt": "^4.2.1",
     "openai": "^4.89.0"
+  },
+  "name": "bun-slackbot",
+  "private": true,
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
   }
 }

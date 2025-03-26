@@ -49,7 +49,11 @@ app.message( async( event ) => {
       role: "user",
       content: [
         "So I was talking to my buddies earlier. Here is what they said...",
-        history,
+        [
+          "```",
+          history,
+          "```",
+        ].join("\n"),
         `I am ${bot.user_id}. Provide a thoughtful concise reply.`,
       ].join("\n\n")
     },
