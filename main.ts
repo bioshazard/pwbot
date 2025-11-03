@@ -94,6 +94,10 @@ app.message(async (event) => {
         `Compose the next reply in this thread on behalf of <@${bot.user_id}>. Address <@${incoming.user}> when it helps the reader.`,
       ].join('\n'),
     },
+    {
+      role: 'assistant',
+      content: `<@${bot.user_id}> would say:`
+    }
   ];
 
   const out = await reply(prompt);
