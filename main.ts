@@ -1,5 +1,27 @@
 import { App, LogLevel } from '@slack/bolt';
-import { reply } from './lib/llm';
+import { reply, type PromptMessage } from './lib/llm';
+
+type SlackTextMessage = {
+  text: string;
+  ts: string;
+  channel: string;
+  channel_type?: string;
+  thread_ts?: string;
+  user?: string;
+};
+
+const isSlackTextMessage = (message: unknown): message is SlackTextMessage => {
+  if (!message || typeof message !== 'object') {
+    return false;
+  }
+  const candidate = message as Record<string, unknown>;
+
+  return (
+    typeof candidate.text === 'string' &&
+    typeof candidate.ts === 'string' &&
+    typeof candidate.channel === 'string'
+  );
+};
 
 /**
  * This sample slack application uses SocketMode.
@@ -19,57 +41,70 @@ const app = new App({
 // Could also pull from event.context.botUserId
 const bot = await app.client.auth.test()
 
-app.message( async( event ) => {
+app.message(async (event) => {
+  app.logger.debug('Message seen');
 
-  app.logger.debug("Message seen")
-  const msg = event.message.text
-  const isIM = event.message.channel_type === "im"
-  const tagged = msg.includes(`<@${bot.user_id}>`)
-
-  // Return early if not directed at me
-  if(!tagged && !isIM) {
-    app.logger.info("Ignoring message")
-    return
+  if (!isSlackTextMessage(event.message)) {
+    app.logger.info('Ignoring message without readable text');
+    return;
   }
 
-  const threadTs = event.message.thread_ts || event.message.ts;
+  const incoming = event.message;
+  const tagged = incoming.text.includes(`<@${bot.user_id}>`);
+  const isIM = incoming.channel_type === 'im';
+
+  if (!tagged && !isIM) {
+    app.logger.info('Ignoring message');
+    return;
+  }
+
+  const threadTs = incoming.thread_ts ?? incoming.ts;
   const replies = await app.client.conversations.replies({
-    channel: event.message.channel,
+    channel: incoming.channel,
     ts: threadTs,
   });
 
-  const history = replies.messages?.map(
-    reply => `${reply.user}: ${reply.text}`
-  ).join("\n\n")
+  const transcript =
+    replies.messages
+      ?.map((reply) => {
+        const replyUser =
+          typeof reply?.user === 'string' ? `<@${reply.user}>` : 'unknown';
+        const replyText =
+          typeof reply?.text === 'string' ? reply.text.trim() : '';
+        return `${replyUser}: ${replyText}`;
+      })
+      .join('\n\n') ?? 'No prior messages in the thread.';
 
-
-  const prompt = [
-    { role: 'system', content: "You are a helpful assistant." },
+  const prompt: PromptMessage[] = [
     {
-      role: "user",
+      role: 'system',
       content: [
-        "So I was talking to my buddies earlier. Here is what they said...",
-        [
-          "```",
-          history,
-          "```",
-        ].join("\n"),
-        `I am ${bot.user_id}. Provide a thoughtful concise reply.`,
-      ].join("\n\n")
+        'You help our team by drafting replies inside Slack threads.',
+        'Respond with the exact message body we should post, formatted with Slack markdown when it improves clarity.',
+        'Adopt a concise, friendly, and action-oriented tone. Ask for clarification only if the request lacks required details.',
+      ].join(' '),
     },
-    { role: "assistant", content: `${event.message.user}:` }
-  ]
+    {
+      role: 'user',
+      content: [
+        'Slack thread transcript (latest message last):',
+        '```',
+        transcript,
+        '```',
+        `Compose the next reply in this thread on behalf of <@${bot.user_id}>. Address <@${incoming.user}> when it helps the reader.`,
+      ].join('\n'),
+    },
+  ];
 
-  const out = await reply(prompt)
+  const out = await reply(prompt);
   await event.say({
-    text: `${out}`,
+    text: out,
     mrkdwn: true,
-    thread_ts: event.message.ts,
-  })
+    thread_ts: incoming.ts,
+  });
 });
 
 (async () => {
   await app.start();
   app.logger.info('⚡️ Bolt app is running!');
 })();
-
