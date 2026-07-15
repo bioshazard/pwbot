@@ -1,15 +1,37 @@
-# bun-slackbot
+# pwbot
 
-To install dependencies:
+Slack bot powered by the Vercel AI SDK and an OpenAI-compatible chat endpoint.
+
+## Setup
+
+Install dependencies:
 
 ```bash
 bun install
 ```
 
-To run:
+Configure:
 
-```bash
-bun run 
+```dotenv
+SLACK_BOT_TOKEN=xoxb-...
+SLACK_APP_TOKEN=xapp-...
+OPENAI_API_KEY=...
+OPENAI_API_BASE=https://api.openai.com/v1
+OPENAI_API_MODEL=gpt-4o
 ```
 
-This project was created using `bun init` in bun v1.2.6. [Bun](https://bun.sh) is a fast all-in-one JavaScript runtime.
+`OPENAI_API_BASE` and `OPENAI_API_MODEL` are optional. The defaults are the
+OpenAI API and `gpt-4o`.
+
+Run:
+
+```bash
+bun start
+```
+
+Validate:
+
+```bash
+bun test
+bun run typecheck
+```
