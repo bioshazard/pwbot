@@ -1,24 +1,30 @@
-import OpenAI from 'openai';
+import { createOpenAI } from '@ai-sdk/openai';
+import { generateText, type LanguageModel } from 'ai';
 
 export type PromptMessage = {
   role: 'system' | 'user' | 'assistant';
   content: string;
 };
 
-export const client = new OpenAI({
+export const provider = createOpenAI({
   apiKey: process.env.OPENAI_API_KEY,
   baseURL: process.env.OPENAI_API_BASE,
 });
 
-const stripThinkTags = (content: string) =>
+export const stripThinkTags = (content: string) =>
   content.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
 
-export const reply = async (prompt: PromptMessage[]) => {
-  const completion = await client.chat.completions.create({
-    model: process.env.OPENAI_API_MODEL || 'gpt-4o',
-    messages: prompt,
-  });
+export const createReply =
+  (model: LanguageModel) => async (prompt: PromptMessage[]) => {
+    const { text } = await generateText({
+      model,
+      messages: prompt,
+      allowSystemInMessages: true,
+    });
 
-  const message = completion.choices[0]?.message?.content ?? '';
-  return stripThinkTags(message);
-};
+    return stripThinkTags(text);
+  };
+
+export const reply = createReply(
+  provider.chat(process.env.OPENAI_API_MODEL || 'gpt-4o'),
+);
