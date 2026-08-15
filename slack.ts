@@ -1,8 +1,263 @@
 import { Database } from "bun:sqlite";
 import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
+import { appendFile } from "node:fs/promises";
 
 import { App } from "@slack/bolt";
+import type { KnownBlock } from "@slack/types";
+import { z } from "zod";
+
+interface MessageEvent {
+  id: string;
+  channel: string;
+  ts: string;
+  text: string;
+  user?: string;
+  threadTs?: string;
+  channelType?: string;
+  botId?: string;
+}
+
+interface PollMetadata {
+  channelId: string;
+  creatorId: string;
+}
+
+interface Poll {
+  id: string;
+  channelId: string;
+  question: string;
+  creatorId: string;
+  status: "open" | "closed";
+  options: { id: string; label: string; votes: number }[];
+}
+
+interface PollVoteButton {
+  action_id: string;
+  style?: "danger";
+  text: { text: string; type: "plain_text" };
+  type: "button";
+  value: string;
+}
+
+interface EventBodyInput {
+  event_id?: string;
+}
+interface MessageInput {
+  bot_id?: string;
+  channel?: string;
+  channel_type?: string;
+  text?: string;
+  thread_ts?: string;
+  ts?: string;
+  user?: string;
+}
+interface ActionInput {
+  type: string;
+  value?: string;
+}
+type LogDetails =
+  | Error
+  | Record<string, boolean | null | number | string | undefined>;
+
+interface ToolCall {
+  id: string;
+  function: { name: string; arguments: string };
+}
+
+interface CompletionMessage {
+  content?: string | null;
+  tool_calls?: ToolCall[];
+}
+
+type ChatMessage =
+  | { role: "system" | "user"; content: string }
+  | { role: "assistant"; content: string | null; tool_calls: ToolCall[] }
+  | { role: "tool"; tool_call_id: string; content: string };
+
+const eventBodySchema = z.object({ event_id: z.string().optional() });
+const messageSchema = z.object({
+  bot_id: z.string().optional(),
+  channel: z.string(),
+  channel_type: z.string().optional(),
+  text: z.string(),
+  thread_ts: z.string().optional(),
+  ts: z.string(),
+  user: z.string().optional(),
+});
+const pollMetadataSchema = z.object({
+  channelId: z.string(),
+  creatorId: z.string(),
+});
+const actionSchema = z.object({ value: z.string() });
+const pollActionBodySchema = z.object({
+  container: z.object({
+    channel_id: z.string().optional(),
+    message_ts: z.string().optional(),
+  }),
+  type: z.literal("block_actions"),
+  user: z.object({ id: z.string() }),
+});
+const completionSchema = z.object({
+  choices: z.array(
+    z.object({
+      message: z.object({
+        content: z.string().nullable().optional(),
+        tool_calls: z
+          .array(
+            z.object({
+              function: z.object({ arguments: z.string(), name: z.string() }),
+              id: z.string(),
+            })
+          )
+          .optional(),
+      }),
+    })
+  ),
+});
+const karmaToolArgumentsSchema = z.object({
+  userId: z.string().regex(/^[A-Z0-9]+$/u),
+});
+const karmaRowSchema = z.object({ score: z.number() });
+const pollRowSchema = z.object({
+  channel_id: z.string(),
+  creator_id: z.string(),
+  id: z.string(),
+  question: z.string(),
+  status: z.enum(["open", "closed"]),
+});
+const pollOptionRowSchema = z.object({
+  id: z.string(),
+  label: z.string(),
+  votes: z.number(),
+});
+const postedMessageSchema = z.object({ ts: z.string() });
+
+const required = (name: string): string => {
+  const value = process.env[name]?.trim();
+  if (value === undefined || value.length === 0) {
+    throw new Error(`${name} is required`);
+  }
+  return value;
+};
+
+const log = (message: string, details?: LogDetails): void => {
+  const suffix = details
+    ? ` ${details instanceof Error ? (details.stack ?? details.message) : JSON.stringify(details)}`
+    : "";
+  const line = `${new Date().toISOString()} ${message}${suffix}`;
+  appendFileSync("log.out", `${line}\n`);
+  console.log(line);
+};
+
+const logAsync = async (
+  message: string,
+  details?: LogDetails
+): Promise<void> => {
+  const suffix =
+    details === undefined
+      ? ""
+      : ` ${details instanceof Error ? (details.stack ?? details.message) : JSON.stringify(details)}`;
+  const line = `${new Date().toISOString()} ${message}${suffix}`;
+  await appendFile("log.out", `${line}\n`);
+  console.log(line);
+};
+
+const karmaCommand = (text: string): boolean =>
+  /^\s*<@[A-Za-z0-9]+>\s*(?:\+\+|--)(?:\s+[^\n]+)?\s*$/u.test(text);
+
+const stripThinkTags = (text: string): string =>
+  text.replaceAll(/<think>[\s\S]*?<\/think>/giu, "").trim();
+
+const inputBlock = (id: string, label: string, placeholder: string) => ({
+  block_id: id,
+  element: {
+    action_id: "value",
+    placeholder: { text: placeholder, type: "plain_text" as const },
+    type: "plain_text_input" as const,
+  },
+  label: { text: label, type: "plain_text" as const },
+  type: "input" as const,
+});
+
+const parsePollMetadata = (value: string): PollMetadata => {
+  const parsed = pollMetadataSchema.safeParse(JSON.parse(value));
+  if (!parsed.success) {
+    throw new TypeError("Invalid poll metadata");
+  }
+  return parsed.data;
+};
+
+const inputValue = (
+  values: Record<string, Record<string, { value?: string | null }>>,
+  blockId: string
+): string => values[blockId]?.value?.value ?? "";
+
+const actionValue = (action: ActionInput): string | undefined =>
+  actionSchema.safeParse(action).data?.value;
+
+const pollModal = (metadata: PollMetadata, optionCount: number) => ({
+  blocks: [
+    inputBlock("poll_question", "Question", "What should we decide?"),
+    ...Array.from({ length: optionCount }, (_, index) =>
+      inputBlock(`poll_option_${index}`, `Option ${index + 1}`, "Option")
+    ),
+    ...(optionCount < 10
+      ? [
+          {
+            elements: [
+              {
+                action_id: "poll_add_option",
+                text: { text: "Add option", type: "plain_text" as const },
+                type: "button" as const,
+                value: String(optionCount),
+              },
+            ],
+            type: "actions" as const,
+          },
+        ]
+      : []),
+  ],
+  callback_id: "poll_create",
+  close: { text: "Cancel", type: "plain_text" as const },
+  private_metadata: JSON.stringify(metadata),
+  submit: { text: "Create", type: "plain_text" as const },
+  title: { text: "Create poll", type: "plain_text" as const },
+  type: "modal" as const,
+});
+
+const eventId = (body: EventBodyInput, fallback: string): string =>
+  eventBodySchema.safeParse(body).data?.event_id ?? fallback;
+
+const readMessage = (
+  value: MessageInput,
+  body: EventBodyInput
+): MessageEvent | undefined => {
+  const parsed = messageSchema.safeParse(value);
+  if (!parsed.success) {
+    return undefined;
+  }
+  const message = parsed.data;
+  const event: MessageEvent = {
+    channel: message.channel,
+    id: eventId(body, `${message.channel}:${message.ts}`),
+    text: message.text,
+    ts: message.ts,
+  };
+  if (message.thread_ts !== undefined) {
+    event.threadTs = message.thread_ts;
+  }
+  if (message.channel_type !== undefined) {
+    event.channelType = message.channel_type;
+  }
+  if (message.user !== undefined) {
+    event.user = message.user;
+  }
+  if (message.bot_id !== undefined) {
+    event.botId = message.bot_id;
+  }
+  return event;
+};
 
 const botToken = required("SLACK_BOT_TOKEN");
 const appToken = required("SLACK_APP_TOKEN");
@@ -37,20 +292,61 @@ db.run(`
 
 const app = new App({ appToken, socketMode: true, token: botToken });
 const auth = await app.client.auth.test();
-if (typeof auth.user_id !== "string") {
+if (auth.user_id === undefined || auth.user_id.length === 0) {
   throw new TypeError("Slack did not return a bot user ID");
 }
 const botUserId = auth.user_id;
 
+const uninitialized = (name: string): never => {
+  throw new Error(`${name} was called before initialization`);
+};
+
+let answer: (event: MessageEvent) => Promise<void> = () =>
+  uninitialized("answer");
+let askModel: (thread: string, userId: string) => Promise<string> = () =>
+  uninitialized("askModel");
+let complete: (messages: ChatMessage[]) => Promise<CompletionMessage> = () =>
+  uninitialized("complete");
+let runTool: (call: ToolCall) => string = () => uninitialized("runTool");
+let createPoll: (
+  channelId: string,
+  creatorId: string,
+  question: string,
+  labels: string[]
+) => Poll = () => uninitialized("createPoll");
+let castVote: (
+  pollId: string,
+  optionId: string,
+  userId: string
+) => Poll | undefined = () => uninitialized("castVote");
+let closePoll: (pollId: string, userId: string) => Poll | undefined = () =>
+  uninitialized("closePoll");
+let getPoll: (id: string) => Poll | undefined = () => uninitialized("getPoll");
+let renderPoll: (poll: Poll) => KnownBlock[] = () =>
+  uninitialized("renderPoll");
+let applyKarma: (text: string, actor: string) => void = () =>
+  uninitialized("applyKarma");
+let changeKarma: (userId: string, amount: number) => void = () =>
+  uninitialized("changeKarma");
+let once: (
+  id: string,
+  work: () => Promise<void> | void
+) => Promise<void> = () => uninitialized("once");
+let stop: () => Promise<void> = () => uninitialized("stop");
+
 app.message(async ({ message, body }) => {
   const event = readMessage(message, body);
-  if (!event || event.botId || !event.user) {
+  if (
+    event === undefined ||
+    event.botId !== undefined ||
+    event.user === undefined
+  ) {
     return;
   }
   const userId = event.user;
 
   if (karmaCommand(event.text)) {
-    await once(event.id, async () => {
+    await once(event.id, () => {
       applyKarma(event.text, userId);
     });
     return;
@@ -65,7 +361,11 @@ app.message(async ({ message, body }) => {
 
 app.event("app_mention", async ({ event, body }) => {
   const message = readMessage(event, body);
-  if (!message || message.botId || !message.user) {
+  if (
+    message === undefined ||
+    message.botId !== undefined ||
+    message.user === undefined
+  ) {
     return;
   }
   await once(message.id, async () => {
@@ -107,7 +407,7 @@ app.view("poll_create", async ({ ack, body: _body, view, client }) => {
     .toSorted()
     .map((key) => inputValue(values, key).trim())
     .filter(Boolean);
-  if (!question || labels.length < 2) {
+  if (question.length === 0 || labels.length < 2) {
     await ack({
       errors: { poll_question: "Enter a question and at least two options." },
       response_action: "errors",
@@ -122,16 +422,18 @@ app.view("poll_create", async ({ ack, body: _body, view, client }) => {
     labels
   );
   try {
-    const posted = await client.chat.postMessage({
+    const postMessage = client.chat.postMessage.bind(client.chat);
+    const posted = await postMessage({
       blocks: renderPoll(poll),
       channel: poll.channelId,
       text: poll.question,
     });
-    if (typeof posted.ts !== "string") {
+    const postedMessage = postedMessageSchema.safeParse(posted);
+    if (!postedMessage.success) {
       throw new TypeError("Slack returned no message timestamp");
     }
     db.prepare("UPDATE polls SET message_ts = ? WHERE id = ?").run(
-      posted.ts,
+      postedMessage.data.ts,
       poll.id
     );
   } catch (error) {
@@ -142,46 +444,63 @@ app.view("poll_create", async ({ ack, body: _body, view, client }) => {
 
 app.action("poll_vote", async ({ ack, body, action, client }) => {
   await ack();
+  const parsedBody = pollActionBodySchema.safeParse(body);
   const value = actionValue(action);
-  if (body.type !== "block_actions" || !value) {
+  if (!parsedBody.success || value === undefined) {
     return;
   }
+  const { container, user } = parsedBody.data;
   const [pollId, optionId] = value.split(":");
-  if (!pollId || !optionId) {
+  if (
+    pollId === undefined ||
+    pollId.length === 0 ||
+    optionId === undefined ||
+    optionId.length === 0
+  ) {
     return;
   }
-  const poll = castVote(pollId, optionId, body.user.id);
-  if (!poll || !body.container.channel_id || !body.container.message_ts) {
+  const poll = castVote(pollId, optionId, user.id);
+  if (
+    poll === undefined ||
+    container.channel_id === undefined ||
+    container.message_ts === undefined
+  ) {
     return;
   }
   await client.chat.update({
     blocks: renderPoll(poll),
-    channel: body.container.channel_id,
+    channel: container.channel_id,
     text: poll.question,
-    ts: body.container.message_ts,
+    ts: container.message_ts,
   });
 });
 
 app.action("poll_close", async ({ ack, body, action, client }) => {
   await ack();
+  const parsedBody = pollActionBodySchema.safeParse(body);
   const value = actionValue(action);
-  if (body.type !== "block_actions" || !value) {
+  if (!parsedBody.success || value === undefined) {
     return;
   }
-  const poll = closePoll(value, body.user.id);
-  if (!poll || !body.container.channel_id || !body.container.message_ts) {
+  const { container, user } = parsedBody.data;
+  const poll = closePoll(value, user.id);
+  if (
+    poll === undefined ||
+    container.channel_id === undefined ||
+    container.message_ts === undefined
+  ) {
     return;
   }
   await client.chat.update({
     blocks: renderPoll(poll),
-    channel: body.container.channel_id,
+    channel: container.channel_id,
     text: `Closed: ${poll.question}`,
-    ts: body.container.message_ts,
+    ts: container.message_ts,
   });
 });
 
 app.event("reaction_added", async ({ event, body }) => {
-  await once(eventId(body, `reaction-added:${event.event_ts}`), async () => {
+  await once(eventId(body, `reaction-added:${event.event_ts}`), () => {
     if (
       event.item.type !== "message" ||
       !event.item_user ||
@@ -199,7 +518,7 @@ app.event("reaction_added", async ({ event, body }) => {
 });
 
 app.event("reaction_removed", async ({ event, body }) => {
-  await once(eventId(body, `reaction-removed:${event.event_ts}`), async () => {
+  await once(eventId(body, `reaction-removed:${event.event_ts}`), () => {
     if (
       event.item.type !== "message" ||
       !event.item_user ||
@@ -216,23 +535,25 @@ app.event("reaction_removed", async ({ event, body }) => {
   });
 });
 
-app.error(async (error) => {
-  log("Bolt error", error);
-});
 process.on("uncaughtException", (error) => {
   log("Uncaught exception", error);
 });
 process.on("unhandledRejection", (error) => {
-  log("Unhandled rejection", error);
+  log(
+    "Unhandled rejection",
+    error instanceof Error ? error : { error: String(error) }
+  );
 });
-process.once("SIGINT", () => void stop());
-process.once("SIGTERM", () => void stop());
 
-await app.start();
-log("PW Bot is running", { botUserId });
+// oxlint-disable-next-line promise/prefer-await-to-callbacks
+app.error(async (error) => {
+  // Bolt's public API requires a Promise-returning error callback.
+  // oxlint-disable-next-line promise/no-promise-in-callback
+  await logAsync("Bolt error", error);
+});
 
-async function answer(event: MessageEvent): Promise<void> {
-  if (!event.user) {
+answer = async (event: MessageEvent): Promise<void> => {
+  if (event.user === undefined) {
     return;
   }
   log("Received message", {
@@ -246,29 +567,37 @@ async function answer(event: MessageEvent): Promise<void> {
   });
   const thread =
     (replies.messages ?? [])
-      .map(
-        (message) =>
-          `${typeof message.user === "string" ? `<@${message.user}>` : "unknown"}: ${typeof message.text === "string" ? message.text.trim() : ""}`
-      )
+      .map((message) => {
+        const parsed = messageSchema.safeParse(message);
+        if (!parsed.success) {
+          return "unknown: ";
+        }
+        const { text: messageText, user } = parsed.data;
+        return `${user === undefined ? "unknown" : `<@${user}>`}: ${messageText.trim()}`;
+      })
       .join("\n") || "No messages.";
   let text: string;
   try {
     text = await askModel(thread, event.user);
   } catch (error) {
-    log("Model request failed", error);
+    log(
+      "Model request failed",
+      error instanceof Error ? error : { error: String(error) }
+    );
     text =
       "Sorry — the reply service is temporarily unavailable (503). Please try again.";
   }
-  await app.client.chat.postMessage({
+  const postMessage = app.client.chat.postMessage.bind(app.client.chat);
+  await postMessage({
     channel: event.channel,
     mrkdwn: true,
     text,
     thread_ts: event.threadTs ?? event.ts,
   });
   log("Posted reply", { eventId: event.id });
-}
+};
 
-async function askModel(thread: string, userId: string): Promise<string> {
+askModel = async (thread: string, userId: string): Promise<string> => {
   const messages: ChatMessage[] = [
     {
       content:
@@ -280,12 +609,12 @@ async function askModel(thread: string, userId: string): Promise<string> {
       role: "user",
     },
   ];
-  for (let turn = 0; turn < 2; turn += 1) {
+  const resolveTurn = async (turn: number): Promise<string> => {
     const message = await complete(messages);
     const calls = message.tool_calls ?? [];
     if (calls.length === 0) {
       const text = stripThinkTags(message.content ?? "");
-      if (text) {
+      if (text.length > 0) {
         return text;
       }
       throw new Error("Model returned no text");
@@ -302,11 +631,15 @@ async function askModel(thread: string, userId: string): Promise<string> {
         tool_call_id: call.id,
       });
     }
-  }
-  throw new Error("Model exceeded tool-call limit");
-}
+    if (turn === 1) {
+      throw new Error("Model exceeded tool-call limit");
+    }
+    return await resolveTurn(turn + 1);
+  };
+  return await resolveTurn(0);
+};
 
-async function complete(messages: ChatMessage[]): Promise<CompletionMessage> {
+complete = async (messages: ChatMessage[]): Promise<CompletionMessage> => {
   const base = (
     process.env.OPENAI_API_BASE ?? "https://api.openai.com/v1"
   ).replace(/\/$/u, "");
@@ -348,146 +681,42 @@ async function complete(messages: ChatMessage[]): Promise<CompletionMessage> {
       `Model request failed: ${response.status} ${await response.text()}`
     );
   }
-  const body = (await response.json()) as {
-    choices?: { message?: CompletionMessage }[];
-  };
-  const message = body.choices?.[0]?.message;
-  if (!message) {
+  const parsed = completionSchema.safeParse(await response.json());
+  const message = parsed.data?.choices[0]?.message;
+  if (message === undefined) {
     throw new Error("Model returned no message");
   }
   return message;
-}
+};
 
-function runTool(call: ToolCall): string {
+runTool = (call: ToolCall): string => {
   if (call.function.name !== "getKarma") {
     return JSON.stringify({ error: "Unknown tool" });
   }
   try {
-    const { userId } = JSON.parse(call.function.arguments) as {
-      userId?: unknown;
-    };
-    if (typeof userId !== "string" || !/^[A-Z0-9]+$/.test(userId)) {
+    const parsed = karmaToolArgumentsSchema.safeParse(
+      JSON.parse(call.function.arguments)
+    );
+    if (!parsed.success) {
       return JSON.stringify({ error: "Invalid user ID" });
     }
+    const { userId } = parsed.data;
     const row = db
-      .prepare("SELECT score FROM karma WHERE user_id = ?")
-      .get(userId) as { score: number } | undefined;
-    return JSON.stringify({ score: row?.score ?? 0, userId });
+      .query<unknown, [string]>("SELECT score FROM karma WHERE user_id = ?")
+      .get(userId);
+    const karma = karmaRowSchema.safeParse(row);
+    return JSON.stringify({ score: karma.data?.score ?? 0, userId });
   } catch {
     return JSON.stringify({ error: "Invalid tool arguments" });
   }
-}
+};
 
-function stripThinkTags(text: string): string {
-  return text.replaceAll(/<think>[\s\S]*?<\/think>/giu, "").trim();
-}
-
-interface ToolCall {
-  id: string;
-  function: { name: string; arguments: string };
-}
-
-interface CompletionMessage {
-  content?: string | null;
-  tool_calls?: ToolCall[];
-}
-
-type ChatMessage =
-  | { role: "system" | "user"; content: string }
-  | { role: "assistant"; content: string | null; tool_calls: ToolCall[] }
-  | { role: "tool"; tool_call_id: string; content: string };
-
-interface Poll {
-  id: string;
-  channelId: string;
-  question: string;
-  creatorId: string;
-  status: "open" | "closed";
-  options: { id: string; label: string; votes: number }[];
-}
-
-interface PollMetadata {
-  channelId: string;
-  creatorId: string;
-}
-
-function pollModal(metadata: PollMetadata, optionCount: number) {
-  return {
-    blocks: [
-      inputBlock("poll_question", "Question", "What should we decide?"),
-      ...Array.from({ length: optionCount }, (_, index) =>
-        inputBlock(`poll_option_${index}`, `Option ${index + 1}`, "Option")
-      ),
-      ...(optionCount < 10
-        ? [
-            {
-              elements: [
-                {
-                  action_id: "poll_add_option",
-                  text: { text: "Add option", type: "plain_text" as const },
-                  type: "button" as const,
-                  value: String(optionCount),
-                },
-              ],
-              type: "actions" as const,
-            },
-          ]
-        : []),
-    ],
-    callback_id: "poll_create",
-    close: { text: "Cancel", type: "plain_text" as const },
-    private_metadata: JSON.stringify(metadata),
-    submit: { text: "Create", type: "plain_text" as const },
-    title: { text: "Create poll", type: "plain_text" as const },
-    type: "modal" as const,
-  };
-}
-
-function inputBlock(id: string, label: string, placeholder: string) {
-  return {
-    block_id: id,
-    element: {
-      action_id: "value",
-      placeholder: { text: placeholder, type: "plain_text" as const },
-      type: "plain_text_input" as const,
-    },
-    label: { text: label, type: "plain_text" as const },
-    type: "input" as const,
-  };
-}
-
-function parsePollMetadata(value: string): PollMetadata {
-  const parsed = JSON.parse(value) as Partial<PollMetadata>;
-  if (
-    typeof parsed.channelId !== "string" ||
-    typeof parsed.creatorId !== "string"
-  ) {
-    throw new TypeError("Invalid poll metadata");
-  }
-  return { channelId: parsed.channelId, creatorId: parsed.creatorId };
-}
-
-function inputValue(
-  values: Record<string, Record<string, { value?: string | null }>>,
-  blockId: string
-): string {
-  return values[blockId]?.value?.value ?? "";
-}
-
-function actionValue(action: unknown): string | undefined {
-  return action &&
-    typeof action === "object" &&
-    typeof (action as { value?: unknown }).value === "string"
-    ? (action as { value: string }).value
-    : undefined;
-}
-
-function createPoll(
+createPoll = (
   channelId: string,
   creatorId: string,
   question: string,
   labels: string[]
-): Poll {
+): Poll => {
   const pollId = randomUUID();
   const create = db.transaction(() => {
     db.prepare(
@@ -496,19 +725,24 @@ function createPoll(
     const insert = db.prepare(
       "INSERT INTO poll_options(id, poll_id, label, position) VALUES (?, ?, ?, ?)"
     );
-    labels.forEach((label, position) =>
-      insert.run(randomUUID(), pollId, label, position)
-    );
+    for (const [position, label] of labels.entries()) {
+      insert.run(randomUUID(), pollId, label, position);
+    }
   });
   create();
-  return getPoll(pollId)!;
-}
+  const poll = getPoll(pollId);
+  if (poll === undefined) {
+    throw new Error("Created poll could not be read");
+  }
+  return poll;
+};
 
-function castVote(
+castVote = (
   pollId: string,
   optionId: string,
   userId: string
-): Poll | undefined {
+): Poll | undefined => {
+  let updated: Poll | undefined;
   const vote = db.transaction(() => {
     const poll = getPoll(pollId);
     if (
@@ -521,56 +755,57 @@ function castVote(
     db.prepare(
       "INSERT INTO poll_votes(poll_id, user_id, option_id) VALUES (?, ?, ?) ON CONFLICT(poll_id, user_id) DO UPDATE SET option_id = excluded.option_id"
     ).run(pollId, userId, optionId);
-    return getPoll(pollId);
+    updated = getPoll(pollId);
   });
-  return vote();
-}
+  vote();
+  return updated;
+};
 
-function closePoll(pollId: string, userId: string): Poll | undefined {
+closePoll = (pollId: string, userId: string): Poll | undefined => {
+  let updated: Poll | undefined;
   const close = db.transaction(() => {
     const poll = getPoll(pollId);
     if (!poll || poll.creatorId !== userId || poll.status !== "open") {
       return;
     }
     db.prepare("UPDATE polls SET status = 'closed' WHERE id = ?").run(pollId);
-    return getPoll(pollId);
+    updated = getPoll(pollId);
   });
-  return close();
-}
+  close();
+  return updated;
+};
 
-function getPoll(id: string): Poll | undefined {
-  const row = db
-    .prepare(
+getPoll = (id: string): Poll | undefined => {
+  const rawRow = db
+    .query<unknown, [string]>(
       "SELECT id, channel_id, question, creator_id, status FROM polls WHERE id = ?"
     )
-    .get(id) as
-    | {
-        id: string;
-        channel_id: string;
-        question: string;
-        creator_id: string;
-        status: "open" | "closed";
-      }
-    | undefined;
-  if (!row) {
+    .get(id);
+  const pollRow = pollRowSchema.safeParse(rawRow);
+  if (!pollRow.success) {
     return undefined;
   }
-  const options = db
-    .prepare(
+  const rawOptions = db
+    .query<unknown, [string]>(
       "SELECT o.id, o.label, COUNT(v.user_id) AS votes FROM poll_options o LEFT JOIN poll_votes v ON v.option_id = o.id WHERE o.poll_id = ? GROUP BY o.id ORDER BY o.position"
     )
-    .all(id) as { id: string; label: string; votes: number }[];
+    .all(id);
+  const options = z.array(pollOptionRowSchema).safeParse(rawOptions);
+  if (!options.success) {
+    throw new TypeError("Invalid poll options in database");
+  }
+  const row = pollRow.data;
   return {
     channelId: row.channel_id,
     creatorId: row.creator_id,
     id: row.id,
-    options,
+    options: options.data,
     question: row.question,
     status: row.status,
   };
-}
+};
 
-function renderPoll(poll: Poll) {
+renderPoll = (poll: Poll) => {
   const total = poll.options.reduce((sum, option) => sum + option.votes, 0);
   return [
     {
@@ -580,21 +815,21 @@ function renderPoll(poll: Poll) {
       },
       type: "section" as const,
     },
-    ...poll.options.map((option) => ({
-      elements: [
-        {
-          action_id: "poll_vote",
-          text: {
-            text: `${option.label} (${option.votes})`,
-            type: "plain_text" as const,
-          },
-          type: "button" as const,
-          value: `${poll.id}:${option.id}`,
-          ...(poll.status === "closed" ? { style: "danger" as const } : {}),
+    ...poll.options.map((option) => {
+      const button: PollVoteButton = {
+        action_id: "poll_vote",
+        text: {
+          text: `${option.label} (${option.votes})`,
+          type: "plain_text",
         },
-      ],
-      type: "actions" as const,
-    })),
+        type: "button",
+        value: `${poll.id}:${option.id}`,
+      };
+      if (poll.status === "closed") {
+        button.style = "danger";
+      }
+      return { elements: [button], type: "actions" as const };
+    }),
     poll.status === "open"
       ? {
           elements: [
@@ -612,14 +847,17 @@ function renderPoll(poll: Poll) {
           type: "context" as const,
         },
   ];
-}
+};
 
-function applyKarma(text: string, actor: string): void {
-  const match = /^\s*<@(?<target>[A-Za-z0-9]+)>\s*(?<direction>\+\+|--)(?:\s+[^\n]+)?\s*$/u.exec(text);
+applyKarma = (text: string, actor: string): void => {
+  const match =
+    /^\s*<@(?<target>[A-Za-z0-9]+)>\s*(?<direction>\+\+|--)(?:\s+[^\n]+)?\s*$/u.exec(
+      text
+    );
   if (!match) {
     return;
   }
-  const groups = match.groups;
+  const { groups } = match;
   if (groups === undefined) {
     return;
   }
@@ -629,18 +867,15 @@ function applyKarma(text: string, actor: string): void {
   }
   changeKarma(target, direction === "++" ? 1 : -1);
   log("Applied message karma", { direction, target });
-}
+};
 
-function changeKarma(userId: string, amount: number): void {
+changeKarma = (userId: string, amount: number): void => {
   db.prepare(
     `INSERT INTO karma(user_id, score) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET score = score + excluded.score`
   ).run(userId, amount);
-}
+};
 
-async function once(
-  id: string,
-  work: () => Promise<void> | void
-): Promise<void> {
+once = async (id: string, work: () => Promise<void> | void): Promise<void> => {
   const claimed =
     db
       .prepare("INSERT OR IGNORE INTO handled_events(event_id) VALUES (?)")
@@ -652,81 +887,33 @@ async function once(
     await work();
   } catch (error) {
     db.prepare("DELETE FROM handled_events WHERE event_id = ?").run(id);
-    log("Event failed", error);
+    log(
+      "Event failed",
+      error instanceof Error ? error : { error: String(error) }
+    );
     throw error;
   }
-}
+};
 
-function readMessage(value: unknown, body: unknown): MessageEvent | undefined {
-  if (!value || typeof value !== "object") {
-    return undefined;
-  }
-  const message = value as Record<string, unknown>;
-  if (
-    typeof message.channel !== "string" ||
-    typeof message.ts !== "string" ||
-    typeof message.text !== "string"
-  ) {
-    return undefined;
-  }
-  return {
-    channel: message.channel,
-    id: eventId(body, `${message.channel}:${message.ts}`),
-    text: message.text,
-    ts: message.ts,
-    ...(typeof message.thread_ts === "string"
-      ? { threadTs: message.thread_ts }
-      : {}),
-    ...(typeof message.channel_type === "string"
-      ? { channelType: message.channel_type }
-      : {}),
-    ...(typeof message.user === "string" ? { user: message.user } : {}),
-    ...(typeof message.bot_id === "string" ? { botId: message.bot_id } : {}),
-  };
-}
-
-function karmaCommand(text: string): boolean {
-  return /^\s*<@[A-Za-z0-9]+>\s*(?:\+\+|--)(?:\s+[^\n]+)?\s*$/u.test(text);
-}
-
-function eventId(body: unknown, fallback: string): string {
-  return body &&
-    typeof body === "object" &&
-    typeof (body as { event_id?: unknown }).event_id === "string"
-    ? (body as { event_id: string }).event_id
-    : fallback;
-}
-
-function required(name: string): string {
-  const value = process.env[name]?.trim();
-  if (!value) {
-    throw new Error(`${name} is required`);
-  }
-  return value;
-}
-
-function log(message: string, details?: unknown): void {
-  const suffix = details
-    ? ` ${details instanceof Error ? (details.stack ?? details.message) : JSON.stringify(details)}`
-    : "";
-  const line = `${new Date().toISOString()} ${message}${suffix}`;
-  appendFileSync("log.out", `${line}\n`);
-  console.log(line);
-}
-
-async function stop(): Promise<void> {
+stop = async (): Promise<void> => {
   log("Stopping PW Bot");
-  db.close();
-  await app.stop();
-}
+  try {
+    await app.stop();
+  } catch (error) {
+    log(
+      "Failed to stop PW Bot",
+      error instanceof Error ? error : { error: String(error) }
+    );
+  } finally {
+    db.close();
+  }
+};
 
-interface MessageEvent {
-  id: string;
-  channel: string;
-  ts: string;
-  text: string;
-  user?: string;
-  threadTs?: string;
-  channelType?: string;
-  botId?: string;
-}
+// Node signal callbacks discard return values.
+// oxlint-disable-next-line eslint/no-void
+process.once("SIGINT", () => void stop());
+// oxlint-disable-next-line eslint/no-void
+process.once("SIGTERM", () => void stop());
+
+await app.start();
+log("PW Bot is running", { botUserId });
