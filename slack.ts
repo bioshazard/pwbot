@@ -40,14 +40,6 @@ interface Poll {
   }[];
 }
 
-interface PollVoteButton {
-  action_id: string;
-  style?: "danger";
-  text: { text: string; type: "plain_text" };
-  type: "button";
-  value: string;
-}
-
 interface CheckboxElement {
   action_id: string;
   initial_options?: {
@@ -1023,7 +1015,36 @@ getPollByMessageTs = (messageTs: string): Poll | undefined => {
 
 renderPoll = (poll: Poll) => {
   const total = poll.options.reduce((sum, option) => sum + option.votes, 0);
-  const heading = `*${poll.question}*`;
+  const voteButtons = poll.options.flatMap((option) => [
+    {
+      action_id: "poll_vote",
+      style: "primary" as const,
+      text: {
+        text: `${option.label} + · ${option.votes}`,
+        type: "plain_text" as const,
+      },
+      type: "button" as const,
+      value: `${poll.id}:${option.id}`,
+    },
+    {
+      action_id: "poll_remove_vote",
+      text: { text: "−", type: "plain_text" as const },
+      type: "button" as const,
+      value: `${poll.id}:${option.id}`,
+    },
+  ]);
+  const resultLines = poll.options.map((option) => {
+    const voters = option.voters
+      .slice(0, 10)
+      .map((voter) => `<@${voter.userId}> ×${voter.votes}`)
+      .join(" · ");
+    const more = option.voters.length - 10;
+    const detail =
+      voters.length === 0
+        ? "_No votes yet_"
+        : `${voters}${more > 0 ? ` · +${more} more` : ""}`;
+    return `• *${option.label}* — ${detail}`;
+  });
   const footer: KnownBlock =
     poll.status === "open"
       ? {
@@ -1044,7 +1065,7 @@ renderPoll = (poll: Poll) => {
   return [
     {
       text: {
-        text: `${heading}\n${total} point${total === 1 ? "" : "s"} cast · up to 3 per person`,
+        text: `*${poll.question}*\n${total} point${total === 1 ? "" : "s"} · 3 per person`,
         type: "mrkdwn" as const,
       },
       type: "section" as const,
@@ -1054,7 +1075,7 @@ renderPoll = (poll: Poll) => {
           {
             elements: [
               {
-                text: "Add an option in this poll's thread with `+ Your option`.",
+                text: "Reply in this thread with *+ your option* to add a choice.",
                 type: "mrkdwn" as const,
               },
             ],
@@ -1063,45 +1084,15 @@ renderPoll = (poll: Poll) => {
         ]
       : []),
     ...(poll.status === "open"
-      ? poll.options.map((option) => {
-          const button: PollVoteButton = {
-            action_id: "poll_vote",
-            text: {
-              text: `+ ${option.label} · ${option.votes}`,
-              type: "plain_text",
-            },
-            type: "button",
-            value: `${poll.id}:${option.id}`,
-          };
-          return {
-            elements: [
-              button,
-              {
-                action_id: "poll_remove_vote",
-                text: { text: "−", type: "plain_text" as const },
-                type: "button" as const,
-                value: `${poll.id}:${option.id}`,
-              },
-            ],
-            type: "actions" as const,
-          };
-        })
+      ? [{ elements: voteButtons, type: "actions" as const }]
       : []),
-    ...poll.options.map((option) => {
-      const visibleVoters = option.voters.slice(0, 10);
-      const voterNames = visibleVoters
-        .map((voter) => `<@${voter.userId}> ×${voter.votes}`)
-        .join(" · ");
-      const remaining = option.voters.length - visibleVoters.length;
-      const text =
-        voterNames.length === 0
-          ? `*${option.label}* — no votes yet`
-          : `*${option.label}* — ${voterNames}${remaining > 0 ? ` · +${remaining} more` : ""}`;
-      return {
-        elements: [{ text, type: "mrkdwn" as const }],
-        type: "context" as const,
-      };
-    }),
+    {
+      text: {
+        text: `*Results*\n${resultLines.join("\n")}`,
+        type: "mrkdwn" as const,
+      },
+      type: "section" as const,
+    },
     footer,
   ];
 };
