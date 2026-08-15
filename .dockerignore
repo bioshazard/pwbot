@@ -1,0 +1,6 @@
+.env*
+.git
+.github
+node_modules
+log.out
+pwbot.sqlite*
