@@ -24,6 +24,9 @@ OPENAI_API_MODEL=gpt-4o
 `OPENAI_API_BASE` and `OPENAI_API_MODEL` are optional. Import or update from
 `slack-manifest.json` in Slack, then reinstall the app so DMs are enabled.
 
+Set `POLL_COMMAND` to match a configured Slack slash command; it defaults to
+`/pwpoll`. Run it to open a poll-creation modal.
+
 ## Run
 
 ```sh

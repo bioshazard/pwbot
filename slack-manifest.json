@@ -10,7 +10,14 @@
     "bot_user": {
       "display_name": "PW Bot Crust",
       "always_online": true
-    }
+    },
+    "slash_commands": [
+      {
+        "command": "/pwpoll",
+        "description": "Create a poll",
+        "should_escape": false
+      }
+    ]
   },
   "oauth_config": {
     "scopes": {
@@ -18,6 +25,7 @@
         "app_mentions:read",
         "channels:history",
         "chat:write",
+        "commands",
         "groups:history",
         "im:history",
         "im:read",

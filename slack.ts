@@ -1,14 +1,37 @@
 import { App } from "@slack/bolt";
 import { Database } from "bun:sqlite";
 import { appendFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 
 const botToken = required("SLACK_BOT_TOKEN");
 const appToken = required("SLACK_APP_TOKEN");
+const pollCommand = process.env.POLL_COMMAND ?? "/pwpoll";
 const db = new Database("pwbot.sqlite");
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS handled_events (event_id TEXT PRIMARY KEY);
   CREATE TABLE IF NOT EXISTS karma (user_id TEXT PRIMARY KEY, score REAL NOT NULL DEFAULT 0);
+  CREATE TABLE IF NOT EXISTS polls (
+    id TEXT PRIMARY KEY,
+    channel_id TEXT NOT NULL,
+    message_ts TEXT,
+    question TEXT NOT NULL,
+    creator_id TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open'
+  );
+  CREATE TABLE IF NOT EXISTS poll_options (
+    id TEXT PRIMARY KEY,
+    poll_id TEXT NOT NULL REFERENCES polls(id) ON DELETE CASCADE,
+    label TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    UNIQUE(poll_id, position)
+  );
+  CREATE TABLE IF NOT EXISTS poll_votes (
+    poll_id TEXT NOT NULL REFERENCES polls(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL,
+    option_id TEXT NOT NULL REFERENCES poll_options(id) ON DELETE CASCADE,
+    PRIMARY KEY(poll_id, user_id)
+  );
 `);
 
 const app = new App({ socketMode: true, token: botToken, appToken });
@@ -36,6 +59,64 @@ app.event("app_mention", async ({ event, body }) => {
   if (!message || message.botId || !message.user) return;
   const userId = message.user;
   await once(message.id, async () => answer(message));
+});
+
+app.command(pollCommand, async ({ ack, body, client }) => {
+  await ack();
+  await client.views.open({ trigger_id: body.trigger_id, view: pollModal({ channelId: body.channel_id, creatorId: body.user_id }, 2) });
+});
+
+app.action("poll_add_option", async ({ ack, body, client }) => {
+  await ack();
+  if (body.type !== "block_actions" || !body.view) return;
+  const metadata = parsePollMetadata(body.view.private_metadata);
+  const optionCount = Math.min(Number(actionValue(body.actions[0]) ?? 2) + 1, 10);
+  await client.views.update({ view_id: body.view.id, hash: body.view.hash, view: pollModal(metadata, optionCount) });
+});
+
+app.view("poll_create", async ({ ack, body, view, client }) => {
+  const metadata = parsePollMetadata(view.private_metadata);
+  const values = view.state.values;
+  const question = inputValue(values, "poll_question").trim();
+  const labels = Object.keys(values)
+    .filter((key) => key.startsWith("poll_option_"))
+    .sort()
+    .map((key) => inputValue(values, key).trim())
+    .filter(Boolean);
+  if (!question || labels.length < 2) {
+    await ack({ response_action: "errors", errors: { poll_question: "Enter a question and at least two options." } });
+    return;
+  }
+  await ack();
+  const poll = createPoll(metadata.channelId, metadata.creatorId, question, labels);
+  try {
+    const posted = await client.chat.postMessage({ channel: poll.channelId, text: poll.question, blocks: renderPoll(poll) });
+    if (typeof posted.ts !== "string") throw new Error("Slack returned no message timestamp");
+    db.prepare("UPDATE polls SET message_ts = ? WHERE id = ?").run(posted.ts, poll.id);
+  } catch (error) {
+    db.prepare("DELETE FROM polls WHERE id = ?").run(poll.id);
+    throw error;
+  }
+});
+
+app.action("poll_vote", async ({ ack, body, action, client }) => {
+  await ack();
+  const value = actionValue(action);
+  if (body.type !== "block_actions" || !value) return;
+  const [pollId, optionId] = value.split(":");
+  if (!pollId || !optionId) return;
+  const poll = castVote(pollId, optionId, body.user.id);
+  if (!poll || !body.container.channel_id || !body.container.message_ts) return;
+  await client.chat.update({ channel: body.container.channel_id, ts: body.container.message_ts, text: poll.question, blocks: renderPoll(poll) });
+});
+
+app.action("poll_close", async ({ ack, body, action, client }) => {
+  await ack();
+  const value = actionValue(action);
+  if (body.type !== "block_actions" || !value) return;
+  const poll = closePoll(value, body.user.id);
+  if (!poll || !body.container.channel_id || !body.container.message_ts) return;
+  await client.chat.update({ channel: body.container.channel_id, ts: body.container.message_ts, text: `Closed: ${poll.question}`, blocks: renderPoll(poll) });
 });
 
 app.event("reaction_added", async ({ event, body }) => {
@@ -169,6 +250,107 @@ type ChatMessage =
   | { role: "system" | "user"; content: string }
   | { role: "assistant"; content: string | null; tool_calls: ToolCall[] }
   | { role: "tool"; tool_call_id: string; content: string };
+
+type Poll = {
+  id: string;
+  channelId: string;
+  question: string;
+  creatorId: string;
+  status: "open" | "closed";
+  options: Array<{ id: string; label: string; votes: number }>;
+};
+
+type PollMetadata = { channelId: string; creatorId: string };
+
+function pollModal(metadata: PollMetadata, optionCount: number) {
+  return {
+    type: "modal" as const,
+    callback_id: "poll_create",
+    private_metadata: JSON.stringify(metadata),
+    title: { type: "plain_text" as const, text: "Create poll" },
+    submit: { type: "plain_text" as const, text: "Create" },
+    close: { type: "plain_text" as const, text: "Cancel" },
+    blocks: [
+      inputBlock("poll_question", "Question", "What should we decide?"),
+      ...Array.from({ length: optionCount }, (_, index) => inputBlock(`poll_option_${index}`, `Option ${index + 1}`, "Option")),
+      ...(optionCount < 10 ? [{ type: "actions" as const, elements: [{ type: "button" as const, action_id: "poll_add_option", value: String(optionCount), text: { type: "plain_text" as const, text: "Add option" } }] }] : []),
+    ],
+  };
+}
+
+function inputBlock(id: string, label: string, placeholder: string) {
+  return {
+    type: "input" as const,
+    block_id: id,
+    label: { type: "plain_text" as const, text: label },
+    element: { type: "plain_text_input" as const, action_id: "value", placeholder: { type: "plain_text" as const, text: placeholder } },
+  };
+}
+
+function parsePollMetadata(value: string): PollMetadata {
+  const parsed = JSON.parse(value) as Partial<PollMetadata>;
+  if (typeof parsed.channelId !== "string" || typeof parsed.creatorId !== "string") throw new Error("Invalid poll metadata");
+  return { channelId: parsed.channelId, creatorId: parsed.creatorId };
+}
+
+function inputValue(values: Record<string, Record<string, { value?: string | null }>>, blockId: string): string {
+  return values[blockId]?.value?.value ?? "";
+}
+
+function actionValue(action: unknown): string | undefined {
+  return action && typeof action === "object" && typeof (action as { value?: unknown }).value === "string"
+    ? (action as { value: string }).value
+    : undefined;
+}
+
+function createPoll(channelId: string, creatorId: string, question: string, labels: string[]): Poll {
+  const pollId = randomUUID();
+  const create = db.transaction(() => {
+    db.prepare("INSERT INTO polls(id, channel_id, question, creator_id) VALUES (?, ?, ?, ?)").run(pollId, channelId, question, creatorId);
+    const insert = db.prepare("INSERT INTO poll_options(id, poll_id, label, position) VALUES (?, ?, ?, ?)");
+    labels.forEach((label, position) => insert.run(randomUUID(), pollId, label, position));
+  });
+  create();
+  return getPoll(pollId)!;
+}
+
+function castVote(pollId: string, optionId: string, userId: string): Poll | undefined {
+  const vote = db.transaction(() => {
+    const poll = getPoll(pollId);
+    if (!poll || poll.status !== "open" || !poll.options.some((option) => option.id === optionId)) return undefined;
+    db.prepare("INSERT INTO poll_votes(poll_id, user_id, option_id) VALUES (?, ?, ?) ON CONFLICT(poll_id, user_id) DO UPDATE SET option_id = excluded.option_id").run(pollId, userId, optionId);
+    return getPoll(pollId);
+  });
+  return vote();
+}
+
+function closePoll(pollId: string, userId: string): Poll | undefined {
+  const close = db.transaction(() => {
+    const poll = getPoll(pollId);
+    if (!poll || poll.creatorId !== userId || poll.status !== "open") return undefined;
+    db.prepare("UPDATE polls SET status = 'closed' WHERE id = ?").run(pollId);
+    return getPoll(pollId);
+  });
+  return close();
+}
+
+function getPoll(id: string): Poll | undefined {
+  const row = db.prepare("SELECT id, channel_id, question, creator_id, status FROM polls WHERE id = ?").get(id) as { id: string; channel_id: string; question: string; creator_id: string; status: "open" | "closed" } | undefined;
+  if (!row) return undefined;
+  const options = db.prepare("SELECT o.id, o.label, COUNT(v.user_id) AS votes FROM poll_options o LEFT JOIN poll_votes v ON v.option_id = o.id WHERE o.poll_id = ? GROUP BY o.id ORDER BY o.position").all(id) as Array<{ id: string; label: string; votes: number }>;
+  return { id: row.id, channelId: row.channel_id, question: row.question, creatorId: row.creator_id, status: row.status, options };
+}
+
+function renderPoll(poll: Poll) {
+  const total = poll.options.reduce((sum, option) => sum + option.votes, 0);
+  return [
+    { type: "section" as const, text: { type: "mrkdwn" as const, text: `*${poll.question}*\n${total} vote${total === 1 ? "" : "s"}` } },
+    ...poll.options.map((option) => ({ type: "actions" as const, elements: [{ type: "button" as const, action_id: "poll_vote", value: `${poll.id}:${option.id}`, text: { type: "plain_text" as const, text: `${option.label} (${option.votes})` }, ...(poll.status === "closed" ? { style: "danger" as const } : {}) }] })),
+    poll.status === "open"
+      ? { type: "actions" as const, elements: [{ type: "button" as const, action_id: "poll_close", value: poll.id, text: { type: "plain_text" as const, text: "Close poll" } }] }
+      : { type: "context" as const, elements: [{ type: "mrkdwn" as const, text: "Poll closed." }] },
+  ];
+}
 
 function applyKarma(text: string, actor: string): void {
   const match = text.match(/^\s*<@([A-Za-z0-9]+)>\s*(\+\+|--)(?:\s+[^\n]+)?\s*$/);
