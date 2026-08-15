@@ -111,6 +111,18 @@ const pollOptionRowSchema = z.object({
   votes: z.number(),
 });
 const postedMessageSchema = z.object({ ts: z.string() });
+const blockValidationSchema = z.object({
+  error: z.string().optional(),
+  errors: z
+    .array(
+      z.object({
+        message: z.string(),
+        pointer: z.string(),
+      })
+    )
+    .optional(),
+  ok: z.boolean(),
+});
 
 const required = (name: string): string => {
   const value = process.env[name]?.trim();
@@ -445,6 +457,25 @@ let once: (
 ) => Promise<void> = () => uninitialized("once");
 let stop: () => Promise<void> = () => uninitialized("stop");
 
+const validatePollMessage = async (
+  client: typeof app.client,
+  poll: Poll
+): Promise<void> => {
+  const result = await client.apiCall("blocks.validate", {
+    message: JSON.stringify({ blocks: renderPoll(poll), text: poll.question }),
+  });
+  const validation = blockValidationSchema.parse(result);
+  if (validation.ok) {
+    return;
+  }
+  const details = validation.errors
+    ?.map((error) => `${error.pointer}: ${error.message}`)
+    .join("; ");
+  throw new Error(
+    `Invalid poll blocks: ${details ?? validation.error ?? "unknown"}`
+  );
+};
+
 app.message(async ({ message, body, client }) => {
   const event = readMessage(message, body);
   if (
@@ -475,6 +506,7 @@ app.message(async ({ message, body, client }) => {
     }
     const poll = addPollOption(parent.id, event.text.replace(/^\+\s+/u, ""));
     if (poll !== undefined) {
+      await validatePollMessage(client, poll);
       await client.chat.update({
         blocks: renderPoll(poll),
         channel: parent.channelId,
@@ -517,6 +549,7 @@ app.command(pollCommand, async ({ ack, body, client }) => {
       parsed.labels,
       parsed.allowOptions
     );
+    await validatePollMessage(client, poll);
     const postMessage = client.chat.postMessage.bind(client.chat);
     const posted = await postMessage({
       blocks: renderPoll(poll),
@@ -614,6 +647,7 @@ app.view("poll_create", async ({ ack, body: _body, view, client }) => {
     configuration.allowOptions
   );
   try {
+    await validatePollMessage(client, poll);
     const postMessage = client.chat.postMessage.bind(client.chat);
     const posted = await postMessage({
       blocks: renderPoll(poll),
@@ -655,6 +689,7 @@ app.action("poll_vote", async ({ ack, body, action, client }) => {
   ) {
     return;
   }
+  await validatePollMessage(client, poll);
   await client.chat.update({
     blocks: renderPoll(poll),
     channel: container.channel_id,
@@ -688,6 +723,7 @@ app.action("poll_remove_vote", async ({ ack, body, action, client }) => {
   ) {
     return;
   }
+  await validatePollMessage(client, poll);
   await client.chat.update({
     blocks: renderPoll(poll),
     channel: container.channel_id,
@@ -712,6 +748,7 @@ app.action("poll_close", async ({ ack, body, action, client }) => {
   ) {
     return;
   }
+  await validatePollMessage(client, poll);
   await client.chat.update({
     blocks: renderPoll(poll),
     channel: container.channel_id,
@@ -1033,6 +1070,13 @@ renderPoll = (poll: Poll) => {
       value: `${poll.id}:${option.id}`,
     },
   ]);
+  const voteControlBlocks = Array.from(
+    { length: Math.ceil(voteButtons.length / 4) },
+    (_, index) => ({
+      elements: voteButtons.slice(index * 4, index * 4 + 4),
+      type: "actions" as const,
+    })
+  );
   const resultLines = poll.options.map((option) => {
     const voters = option.voters
       .slice(0, 10)
@@ -1083,9 +1127,7 @@ renderPoll = (poll: Poll) => {
           },
         ]
       : []),
-    ...(poll.status === "open"
-      ? [{ elements: voteButtons, type: "actions" as const }]
-      : []),
+    ...(poll.status === "open" ? voteControlBlocks : []),
     {
       text: {
         text: `*Results*\n${resultLines.join("\n")}`,
