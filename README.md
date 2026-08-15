@@ -27,6 +27,17 @@ OPENAI_API_MODEL=gpt-4o
 Set `POLL_COMMAND` to match a configured Slack slash command; it defaults to
 `/pwpoll`. Run it to open a poll-creation modal.
 
+## Apply the Slack manifest
+
+Create an app configuration token in Slack, then set it with the target app ID:
+
+```sh
+SLACK_APP_CONFIG_TOKEN=xoxe.xoxp-... SLACK_APP_ID=A123ABC bun run manifest:apply
+```
+
+This replaces the app's full manifest with `slack-manifest.json`. Reinstall the
+app when Slack reports that permissions changed.
+
 ## Run
 
 ```sh

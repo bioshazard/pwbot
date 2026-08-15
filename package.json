@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "start": "bun --env-file=.env.dev slack.ts",
+    "manifest:apply": "bun scripts/apply-manifest.ts",
     "typecheck": "bunx --bun tsc --noEmit"
   },
   "dependencies": {
