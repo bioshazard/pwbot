@@ -1,16 +1,17 @@
-# pwbot
+# PW Bot
 
-Slack bot powered by the Vercel AI SDK and an OpenAI-compatible chat endpoint.
+Small Socket Mode Slack bot.
+
+It replies to DMs and `@mentions`, records `++` / `--` karma, and stores only
+karma plus processed event IDs in `pwbot.sqlite`.
 
 ## Setup
 
-Install dependencies:
-
-```bash
+```sh
 bun install
 ```
 
-Configure:
+Create `.env.dev`:
 
 ```dotenv
 SLACK_BOT_TOKEN=xoxb-...
@@ -20,18 +21,13 @@ OPENAI_API_BASE=https://api.openai.com/v1
 OPENAI_API_MODEL=gpt-4o
 ```
 
-`OPENAI_API_BASE` and `OPENAI_API_MODEL` are optional. The defaults are the
-OpenAI API and `gpt-4o`.
+`OPENAI_API_BASE` and `OPENAI_API_MODEL` are optional. Import or update from
+`slack-manifest.json` in Slack, then reinstall the app so DMs are enabled.
 
-Run:
+## Run
 
-```bash
+```sh
 bun start
 ```
 
-Validate:
-
-```bash
-bun test
-bun run typecheck
-```
+Logs go to `log.out`. Check the code with `bun run typecheck`.
