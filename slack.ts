@@ -30,8 +30,14 @@ interface Poll {
   channelId: string;
   question: string;
   creatorId: string;
-  status: "open" | "closed";
-  options: { id: string; label: string; votes: number }[];
+  allowOptions: boolean;
+  status: "draft" | "open" | "closed";
+  options: {
+    id: string;
+    label: string;
+    voters: { userId: string; votes: number }[];
+    votes: number;
+  }[];
 }
 
 interface PollVoteButton {
@@ -40,6 +46,16 @@ interface PollVoteButton {
   text: { text: string; type: "plain_text" };
   type: "button";
   value: string;
+}
+
+interface CheckboxElement {
+  action_id: string;
+  initial_options?: {
+    text: { text: string; type: "plain_text" };
+    value: string;
+  }[];
+  options: { text: { text: string; type: "plain_text" }; value: string }[];
+  type: "checkboxes";
 }
 
 interface EventBodyInput {
@@ -75,6 +91,7 @@ const messageSchema = z.object({
 const pollMetadataSchema = z.object({
   channelId: z.string(),
   creatorId: z.string(),
+  draftId: z.string().optional(),
 });
 const actionSchema = z.object({ value: z.string() });
 const pollActionBodySchema = z.object({
@@ -82,20 +99,23 @@ const pollActionBodySchema = z.object({
     channel_id: z.string().optional(),
     message_ts: z.string().optional(),
   }),
+  trigger_id: z.string().optional(),
   type: z.literal("block_actions"),
   user: z.object({ id: z.string() }),
 });
 const karmaRowSchema = z.object({ score: z.number() });
 const pollRowSchema = z.object({
+  allow_options: z.number(),
   channel_id: z.string(),
   creator_id: z.string(),
   id: z.string(),
   question: z.string(),
-  status: z.enum(["open", "closed"]),
+  status: z.enum(["draft", "open", "closed"]),
 });
 const pollOptionRowSchema = z.object({
   id: z.string(),
   label: z.string(),
+  voters: z.string(),
   votes: z.number(),
 });
 const postedMessageSchema = z.object({ ts: z.string() });
@@ -133,16 +153,29 @@ const logAsync = async (
 const karmaCommand = (text: string): boolean =>
   /^\s*<@[A-Za-z0-9]+>\s*(?:\+\+|--)(?:\s+[^\n]+)?\s*$/u.test(text);
 
-const inputBlock = (id: string, label: string, placeholder: string) => ({
+const inputBlock = (
+  id: string,
+  label: string,
+  placeholder: string,
+  initialValue = "",
+  optional = false
+) => ({
   block_id: id,
   element: {
     action_id: "value",
+    initial_value: initialValue,
     placeholder: { text: placeholder, type: "plain_text" as const },
     type: "plain_text_input" as const,
   },
   label: { text: label, type: "plain_text" as const },
+  optional,
   type: "input" as const,
 });
+
+const inputValue = (
+  values: Record<string, Record<string, { value?: string | null }>>,
+  blockId: string
+): string => values[blockId]?.value?.value ?? "";
 
 const parsePollMetadata = (value: string): PollMetadata => {
   const parsed = pollMetadataSchema.safeParse(JSON.parse(value));
@@ -152,40 +185,123 @@ const parsePollMetadata = (value: string): PollMetadata => {
   return parsed.data;
 };
 
-const inputValue = (
-  values: Record<string, Record<string, { value?: string | null }>>,
-  blockId: string
-): string => values[blockId]?.value?.value ?? "";
-
 const actionValue = (action: ActionInput): string | undefined =>
   actionSchema.safeParse(action).data?.value;
 
-const pollModal = (metadata: PollMetadata, optionCount: number) => ({
+const parsePollCommand = (text: string) => {
+  const allowOptions = /(?:^|\s)--allow-options(?:\s|$)/u.test(text);
+  const parts = text
+    .replaceAll(/(?:^|\s)--allow-options(?=\s|$)/gu, " ")
+    .split("|")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  return { allowOptions, labels: parts.slice(1, 11), question: parts[0] ?? "" };
+};
+
+const pollConfiguration = (
+  values: Record<
+    string,
+    Record<
+      string,
+      {
+        selected_options?: { value: string }[];
+        value?: string | null;
+      }
+    >
+  >
+) => {
+  const labels = Object.keys(values)
+    .filter((key) => key.startsWith("poll_option_"))
+    .toSorted()
+    .map((key) => inputValue(values, key).trim())
+    .filter(Boolean);
+  const allowOptions =
+    values.poll_settings?.allow_options?.selected_options?.some(
+      (option) => option.value === "allow-options"
+    ) ?? false;
+  return {
+    allowOptions,
+    labels,
+    optionCount: Object.keys(values).filter((key) =>
+      key.startsWith("poll_option_")
+    ).length,
+    question: inputValue(values, "poll_question").trim(),
+  };
+};
+
+const optionCheckbox = (allowOptions: boolean) => {
+  const element: CheckboxElement = {
+    action_id: "allow_options",
+    options: [
+      {
+        text: { text: "Members can add options", type: "plain_text" as const },
+        value: "allow-options",
+      },
+    ],
+    type: "checkboxes" as const,
+  };
+  if (allowOptions) {
+    element.initial_options = element.options;
+  }
+  return element;
+};
+
+const pollModal = (
+  metadata: PollMetadata,
+  optionCount: number,
+  question = "",
+  labels: string[] = [],
+  allowOptions = false
+) => ({
   blocks: [
-    inputBlock("poll_question", "Question", "What should we decide?"),
+    inputBlock("poll_question", "Question", "What should we decide?", question),
     ...Array.from({ length: optionCount }, (_, index) =>
-      inputBlock(`poll_option_${index}`, `Option ${index + 1}`, "Option")
+      inputBlock(
+        `poll_option_${index}`,
+        `Option ${index + 1}`,
+        "Option",
+        labels[index] ?? "",
+        index !== 0
+      )
     ),
-    ...(optionCount < 10
-      ? [
-          {
-            elements: [
+    {
+      elements: [
+        ...(optionCount < 10
+          ? [
               {
                 action_id: "poll_add_option",
                 text: { text: "Add option", type: "plain_text" as const },
                 type: "button" as const,
-                value: String(optionCount),
               },
-            ],
-            type: "actions" as const,
-          },
-        ]
-      : []),
+            ]
+          : []),
+        ...(optionCount > 1
+          ? [
+              {
+                action_id: "poll_remove_option",
+                text: {
+                  text: "Remove last option",
+                  type: "plain_text" as const,
+                },
+                type: "button" as const,
+              },
+            ]
+          : []),
+      ],
+      type: "actions" as const,
+    },
+    {
+      block_id: "poll_settings",
+      element: optionCheckbox(allowOptions),
+      label: { text: "Options", type: "plain_text" as const },
+      optional: true,
+      type: "input" as const,
+    },
   ],
   callback_id: "poll_create",
   close: { text: "Cancel", type: "plain_text" as const },
   private_metadata: JSON.stringify(metadata),
-  submit: { text: "Create", type: "plain_text" as const },
+  submit: { text: "Create poll", type: "plain_text" as const },
   title: { text: "Create poll", type: "plain_text" as const },
   type: "modal" as const,
 });
@@ -237,7 +353,8 @@ db.run(`
     message_ts TEXT,
     question TEXT NOT NULL,
     creator_id TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'open'
+    status TEXT NOT NULL DEFAULT 'draft',
+    allow_options INTEGER NOT NULL DEFAULT 0
   );
   CREATE TABLE IF NOT EXISTS poll_options (
     id TEXT PRIMARY KEY,
@@ -250,9 +367,42 @@ db.run(`
     poll_id TEXT NOT NULL REFERENCES polls(id) ON DELETE CASCADE,
     user_id TEXT NOT NULL,
     option_id TEXT NOT NULL REFERENCES poll_options(id) ON DELETE CASCADE,
-    PRIMARY KEY(poll_id, user_id)
+    votes INTEGER NOT NULL DEFAULT 1 CHECK(votes BETWEEN 1 AND 3),
+    PRIMARY KEY(poll_id, user_id, option_id)
   );
 `);
+
+const voteColumns = db
+  .query<unknown, []>("PRAGMA table_info(poll_votes)")
+  .all()
+  .map((column) => z.object({ name: z.string() }).parse(column).name);
+if (!voteColumns.includes("votes")) {
+  db.transaction(() => {
+    db.run("ALTER TABLE poll_votes RENAME TO poll_votes_legacy");
+    db.run(`
+      CREATE TABLE poll_votes (
+        poll_id TEXT NOT NULL REFERENCES polls(id) ON DELETE CASCADE,
+        user_id TEXT NOT NULL,
+        option_id TEXT NOT NULL REFERENCES poll_options(id) ON DELETE CASCADE,
+        votes INTEGER NOT NULL DEFAULT 1 CHECK(votes BETWEEN 1 AND 3),
+        PRIMARY KEY(poll_id, user_id, option_id)
+      )
+    `);
+    db.run(
+      "INSERT INTO poll_votes(poll_id, user_id, option_id, votes) SELECT poll_id, user_id, option_id, 1 FROM poll_votes_legacy"
+    );
+    db.run("DROP TABLE poll_votes_legacy");
+  })();
+}
+const pollColumns = db
+  .query<unknown, []>("PRAGMA table_info(polls)")
+  .all()
+  .map((column) => z.object({ name: z.string() }).parse(column).name);
+if (!pollColumns.includes("allow_options")) {
+  db.run(
+    "ALTER TABLE polls ADD COLUMN allow_options INTEGER NOT NULL DEFAULT 0"
+  );
+}
 
 const app = new App({ appToken, socketMode: true, token: botToken });
 const auth = await app.client.auth.test();
@@ -271,7 +421,8 @@ let createPoll: (
   channelId: string,
   creatorId: string,
   question: string,
-  labels: string[]
+  labels: string[],
+  allowOptions: boolean
 ) => Poll = () => uninitialized("createPoll");
 let castVote: (
   pollId: string,
@@ -280,7 +431,11 @@ let castVote: (
 ) => Poll | undefined = () => uninitialized("castVote");
 let closePoll: (pollId: string, userId: string) => Poll | undefined = () =>
   uninitialized("closePoll");
+let addPollOption: (pollId: string, label: string) => Poll | undefined = () =>
+  uninitialized("addPollOption");
 let getPoll: (id: string) => Poll | undefined = () => uninitialized("getPoll");
+let getPollByMessageTs: (messageTs: string) => Poll | undefined = () =>
+  uninitialized("getPollByMessageTs");
 let renderPoll: (poll: Poll) => KnownBlock[] = () =>
   uninitialized("renderPoll");
 let applyKarma: (text: string, actor: string) => void = () =>
@@ -293,7 +448,7 @@ let once: (
 ) => Promise<void> = () => uninitialized("once");
 let stop: () => Promise<void> = () => uninitialized("stop");
 
-app.message(async ({ message, body }) => {
+app.message(async ({ message, body, client }) => {
   const event = readMessage(message, body);
   if (
     event === undefined ||
@@ -308,6 +463,28 @@ app.message(async ({ message, body }) => {
     await once(event.id, () => {
       applyKarma(event.text, userId);
     });
+    return;
+  }
+
+  if (event.threadTs !== undefined && /^\+\s+\S/u.test(event.text)) {
+    const parent = getPollByMessageTs(event.threadTs);
+    if (parent === undefined) {
+      if (event.channelType === "im") {
+        await once(event.id, async () => {
+          await answer(event);
+        });
+      }
+      return;
+    }
+    const poll = addPollOption(parent.id, event.text.replace(/^\+\s+/u, ""));
+    if (poll !== undefined) {
+      await client.chat.update({
+        blocks: renderPoll(poll),
+        channel: parent.channelId,
+        text: poll.question,
+        ts: event.threadTs,
+      });
+    }
     return;
   }
 
@@ -334,41 +511,99 @@ app.event("app_mention", async ({ event, body }) => {
 
 app.command(pollCommand, async ({ ack, body, client }) => {
   await ack();
+  const parsed = parsePollCommand(body.text);
+  if (parsed.question.length > 0 && parsed.labels.length >= 1) {
+    const poll = createPoll(
+      body.channel_id,
+      body.user_id,
+      parsed.question,
+      parsed.labels,
+      parsed.allowOptions
+    );
+    const postMessage = client.chat.postMessage.bind(client.chat);
+    const posted = await postMessage({
+      blocks: renderPoll(poll),
+      channel: body.channel_id,
+      text: poll.question,
+    });
+    db.prepare("UPDATE polls SET message_ts = ? WHERE id = ?").run(
+      postedMessageSchema.parse(posted).ts,
+      poll.id
+    );
+    return;
+  }
   await client.views.open({
     trigger_id: body.trigger_id,
-    view: pollModal({ channelId: body.channel_id, creatorId: body.user_id }, 2),
+    view: pollModal({ channelId: body.channel_id, creatorId: body.user_id }, 3),
   });
 });
 
+const updatePollModal = async (
+  client: typeof app.client,
+  view: {
+    hash: string;
+    id: string;
+    private_metadata: string;
+    state: {
+      values: Record<
+        string,
+        Record<
+          string,
+          { selected_options?: { value: string }[]; value?: string | null }
+        >
+      >;
+    };
+  },
+  optionCount: number
+): Promise<void> => {
+  const metadata = parsePollMetadata(view.private_metadata);
+  const configuration = pollConfiguration(view.state.values);
+  await client.views.update({
+    hash: view.hash,
+    view: pollModal(
+      metadata,
+      optionCount,
+      configuration.question,
+      configuration.labels,
+      configuration.allowOptions
+    ),
+    view_id: view.id,
+  });
+};
+
 app.action("poll_add_option", async ({ ack, body, client }) => {
   await ack();
-  if (body.type !== "block_actions" || !body.view) {
+  if (body.type !== "block_actions" || body.view === undefined) {
     return;
   }
-  const metadata = parsePollMetadata(body.view.private_metadata);
   const optionCount = Math.min(
-    Number(actionValue(body.actions[0]) ?? 2) + 1,
+    pollConfiguration(body.view.state.values).optionCount + 1,
     10
   );
-  await client.views.update({
-    hash: body.view.hash,
-    view: pollModal(metadata, optionCount),
-    view_id: body.view.id,
-  });
+  await updatePollModal(client, body.view, optionCount);
+});
+
+app.action("poll_remove_option", async ({ ack, body, client }) => {
+  await ack();
+  if (body.type !== "block_actions" || body.view === undefined) {
+    return;
+  }
+  const optionCount = Math.max(
+    pollConfiguration(body.view.state.values).optionCount - 1,
+    1
+  );
+  await updatePollModal(client, body.view, optionCount);
 });
 
 app.view("poll_create", async ({ ack, body: _body, view, client }) => {
   const metadata = parsePollMetadata(view.private_metadata);
-  const { values } = view.state;
-  const question = inputValue(values, "poll_question").trim();
-  const labels = Object.keys(values)
-    .filter((key) => key.startsWith("poll_option_"))
-    .toSorted()
-    .map((key) => inputValue(values, key).trim())
-    .filter(Boolean);
-  if (question.length === 0 || labels.length < 2) {
+  const configuration = pollConfiguration(view.state.values);
+  if (
+    configuration.question.length === 0 ||
+    configuration.labels.length === 0
+  ) {
     await ack({
-      errors: { poll_question: "Enter a question and at least two options." },
+      errors: { poll_option_0: "Enter the first option." },
       response_action: "errors",
     });
     return;
@@ -377,8 +612,9 @@ app.view("poll_create", async ({ ack, body: _body, view, client }) => {
   const poll = createPoll(
     metadata.channelId,
     metadata.creatorId,
-    question,
-    labels
+    configuration.question,
+    configuration.labels,
+    configuration.allowOptions
   );
   try {
     const postMessage = client.chat.postMessage.bind(client.chat);
@@ -387,12 +623,8 @@ app.view("poll_create", async ({ ack, body: _body, view, client }) => {
       channel: poll.channelId,
       text: poll.question,
     });
-    const postedMessage = postedMessageSchema.safeParse(posted);
-    if (!postedMessage.success) {
-      throw new TypeError("Slack returned no message timestamp");
-    }
     db.prepare("UPDATE polls SET message_ts = ? WHERE id = ?").run(
-      postedMessage.data.ts,
+      postedMessageSchema.parse(posted).ts,
       poll.id
     );
   } catch (error) {
@@ -569,13 +801,14 @@ createPoll = (
   channelId: string,
   creatorId: string,
   question: string,
-  labels: string[]
+  labels: string[],
+  allowOptions: boolean
 ): Poll => {
   const pollId = randomUUID();
   const create = db.transaction(() => {
     db.prepare(
-      "INSERT INTO polls(id, channel_id, question, creator_id) VALUES (?, ?, ?, ?)"
-    ).run(pollId, channelId, question, creatorId);
+      "INSERT INTO polls(id, channel_id, question, creator_id, status, allow_options) VALUES (?, ?, ?, ?, 'open', ?)"
+    ).run(pollId, channelId, question, creatorId, Number(allowOptions));
     const insert = db.prepare(
       "INSERT INTO poll_options(id, poll_id, label, position) VALUES (?, ?, ?, ?)"
     );
@@ -606,12 +839,46 @@ castVote = (
     ) {
       return;
     }
+    const total = db
+      .query<unknown, [string, string]>(
+        "SELECT COALESCE(SUM(votes), 0) AS total FROM poll_votes WHERE poll_id = ? AND user_id = ?"
+      )
+      .get(pollId, userId);
+    const used = z.object({ total: z.number() }).parse(total).total;
+    if (used >= 3) {
+      return;
+    }
     db.prepare(
-      "INSERT INTO poll_votes(poll_id, user_id, option_id) VALUES (?, ?, ?) ON CONFLICT(poll_id, user_id) DO UPDATE SET option_id = excluded.option_id"
+      "INSERT INTO poll_votes(poll_id, user_id, option_id, votes) VALUES (?, ?, ?, 1) ON CONFLICT(poll_id, user_id, option_id) DO UPDATE SET votes = votes + 1"
     ).run(pollId, userId, optionId);
     updated = getPoll(pollId);
   });
   vote();
+  return updated;
+};
+
+addPollOption = (pollId: string, label: string): Poll | undefined => {
+  let updated: Poll | undefined;
+  const add = db.transaction(() => {
+    const poll = getPoll(pollId);
+    if (
+      !poll ||
+      poll.status !== "open" ||
+      !poll.allowOptions ||
+      poll.options.length >= 10 ||
+      label.length === 0 ||
+      poll.options.some(
+        (option) => option.label.toLowerCase() === label.toLowerCase()
+      )
+    ) {
+      return;
+    }
+    db.prepare(
+      "INSERT INTO poll_options(id, poll_id, label, position) VALUES (?, ?, ?, ?)"
+    ).run(randomUUID(), pollId, label, poll.options.length);
+    updated = getPoll(pollId);
+  });
+  add();
   return updated;
 };
 
@@ -632,7 +899,7 @@ closePoll = (pollId: string, userId: string): Poll | undefined => {
 getPoll = (id: string): Poll | undefined => {
   const rawRow = db
     .query<unknown, [string]>(
-      "SELECT id, channel_id, question, creator_id, status FROM polls WHERE id = ?"
+      "SELECT id, channel_id, question, creator_id, status, allow_options FROM polls WHERE id = ?"
     )
     .get(id);
   const pollRow = pollRowSchema.safeParse(rawRow);
@@ -641,7 +908,7 @@ getPoll = (id: string): Poll | undefined => {
   }
   const rawOptions = db
     .query<unknown, [string]>(
-      "SELECT o.id, o.label, COUNT(v.user_id) AS votes FROM poll_options o LEFT JOIN poll_votes v ON v.option_id = o.id WHERE o.poll_id = ? GROUP BY o.id ORDER BY o.position"
+      "SELECT o.id, o.label, COALESCE(SUM(v.votes), 0) AS votes, COALESCE(GROUP_CONCAT(v.user_id || ':' || v.votes, ','), '') AS voters FROM poll_options o LEFT JOIN poll_votes v ON v.option_id = o.id WHERE o.poll_id = ? GROUP BY o.id ORDER BY o.position"
     )
     .all(id);
   const options = z.array(pollOptionRowSchema).safeParse(rawOptions);
@@ -650,56 +917,104 @@ getPoll = (id: string): Poll | undefined => {
   }
   const row = pollRow.data;
   return {
+    allowOptions: row.allow_options === 1,
     channelId: row.channel_id,
     creatorId: row.creator_id,
     id: row.id,
-    options: options.data,
+    options: options.data.map((option) => ({
+      ...option,
+      voters: option.voters
+        .split(",")
+        .filter(Boolean)
+        .map((voter) => {
+          const [userId, votes] = voter.split(":");
+          return { userId: userId ?? "", votes: Number(votes) };
+        }),
+    })),
     question: row.question,
     status: row.status,
   };
 };
 
+getPollByMessageTs = (messageTs: string): Poll | undefined => {
+  const row = db
+    .query<unknown, [string]>("SELECT id FROM polls WHERE message_ts = ?")
+    .get(messageTs);
+  const parsed = z.object({ id: z.string() }).safeParse(row);
+  return parsed.success ? getPoll(parsed.data.id) : undefined;
+};
+
 renderPoll = (poll: Poll) => {
   const total = poll.options.reduce((sum, option) => sum + option.votes, 0);
-  return [
-    {
-      text: {
-        text: `*${poll.question}*\n${total} vote${total === 1 ? "" : "s"}`,
-        type: "mrkdwn" as const,
-      },
-      type: "section" as const,
-    },
-    ...poll.options.map((option) => {
-      const button: PollVoteButton = {
-        action_id: "poll_vote",
-        text: {
-          text: `${option.label} (${option.votes})`,
-          type: "plain_text",
-        },
-        type: "button",
-        value: `${poll.id}:${option.id}`,
-      };
-      if (poll.status === "closed") {
-        button.style = "danger";
-      }
-      return { elements: [button], type: "actions" as const };
-    }),
+  const heading = `*${poll.question}*`;
+  const footer: KnownBlock =
     poll.status === "open"
       ? {
           elements: [
             {
               action_id: "poll_close",
-              text: { text: "Close poll", type: "plain_text" as const },
-              type: "button" as const,
+              text: { text: "Close poll", type: "plain_text" },
+              type: "button",
               value: poll.id,
             },
           ],
-          type: "actions" as const,
+          type: "actions",
         }
       : {
-          elements: [{ text: "Poll closed.", type: "mrkdwn" as const }],
-          type: "context" as const,
-        },
+          elements: [{ text: "Poll closed.", type: "mrkdwn" }],
+          type: "context",
+        };
+  return [
+    {
+      text: {
+        text: `${heading}\n${total} point${total === 1 ? "" : "s"} cast · up to 3 per person`,
+        type: "mrkdwn" as const,
+      },
+      type: "section" as const,
+    },
+    ...(poll.allowOptions && poll.status === "open"
+      ? [
+          {
+            elements: [
+              {
+                text: "Add an option in this poll's thread with `+ Your option`.",
+                type: "mrkdwn" as const,
+              },
+            ],
+            type: "context" as const,
+          },
+        ]
+      : []),
+    ...(poll.status === "open"
+      ? poll.options.map((option) => {
+          const button: PollVoteButton = {
+            action_id: "poll_vote",
+            text: {
+              text: `+ ${option.label} · ${option.votes}`,
+              type: "plain_text",
+            },
+            type: "button",
+            value: `${poll.id}:${option.id}`,
+          };
+          return { elements: [button], type: "actions" as const };
+        })
+      : []),
+    ...poll.options.map((option) => {
+      const visibleVoters = option.voters.slice(0, 10);
+      const voterNames = visibleVoters
+        .map((voter) => `<@${voter.userId}> ×${voter.votes}`)
+        .join(" · ");
+      const remaining = option.voters.length - visibleVoters.length;
+      const text =
+        voterNames.length === 0
+          ? `*${option.label}* — no votes yet`
+          : `*${option.label}* — ${voterNames}${remaining > 0 ? ` · +${remaining} more` : ""}`;
+      return {
+        elements: [{ text, type: "mrkdwn" as const }],
+        type: "context" as const,
+      };
+    }),
+    footer,
   ];
 };
 

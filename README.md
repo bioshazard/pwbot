@@ -27,7 +27,18 @@ The model request timeout defaults to 120 seconds. Import or update from
 `slack-manifest.json` in Slack, then reinstall the app so DMs are enabled.
 
 Set `POLL_COMMAND` to match a configured Slack slash command; it defaults to
-`/pwpoll`. Run it to open a poll-creation modal.
+`/pwpoll`. It opens a private configuration modal; submitting it posts the poll
+to the channel. The modal starts with three options: only Option 1 is required,
+and blank extra options are ignored. Add or remove option fields as needed.
+For a faster start, use inline syntax:
+
+```text
+/pwpoll Where should we eat? | Nori | Little Goat | Pizza
+```
+
+Add `--allow-options` to let members add a choice by replying in the published
+poll's thread with `+ Choice name`. Each member can allocate up to three vote
+points across the choices.
 
 ## Apply the Slack manifest
 
