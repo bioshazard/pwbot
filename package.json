@@ -1,16 +1,7 @@
 {
-  "dependencies": {
-    "@slack/bolt": "^4.7.3"
-  },
-  "devDependencies": {
-    "@types/bun": "^1.3.14",
-    "oxfmt": "^0.63.0",
-    "oxlint": "^1.78.0",
-    "oxlint-tsgolint": "^7.0.2001",
-    "typescript": "^5.9.3",
-    "ultracite": "^7.10.5"
-  },
   "name": "pwbot",
+  "private": true,
+  "type": "module",
   "scripts": {
     "start": "bun --env-file=.env.dev slack.ts",
     "manifest:apply": "bun scripts/apply-manifest.ts",
@@ -21,6 +12,16 @@
     "check": "bun run format:check && bun run lint && bun run typecheck",
     "fix": "bunx --bun ultracite fix --type-aware --type-check"
   },
-  "type": "module",
-  "private": true
+  "dependencies": {
+    "@slack/bolt": "^4.7.3",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.14",
+    "oxfmt": "^0.63.0",
+    "oxlint": "^1.78.0",
+    "oxlint-tsgolint": "^7.0.2001",
+    "typescript": "^5.9.3",
+    "ultracite": "^7.10.5"
+  }
 }
