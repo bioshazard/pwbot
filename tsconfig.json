@@ -8,5 +8,5 @@
     "skipLibCheck": true,
     "types": ["bun-types"]
   },
-  "include": ["slack.ts", "scripts/**/*.ts"]
+  "include": ["slack.ts", "reply.ts", "scripts/**/*.ts", "test/**/*.ts"]
 }
