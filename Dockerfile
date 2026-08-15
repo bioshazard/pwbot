@@ -1,15 +1,14 @@
-# https://bun.sh/guides/ecosystem/docker
-# https://hub.docker.com/r/oven/bun
-
-FROM oven/bun:latest
+FROM oven/bun:1.3.14 AS dependencies
 
 WORKDIR /app
-
-COPY package.json ./
-COPY bun.lock ./
+COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile --production
-COPY . .
 
-# run the app
+FROM oven/bun:1.3.14
+
+WORKDIR /app
+COPY --from=dependencies /app/node_modules ./node_modules
+COPY --chown=bun:bun slack.ts ./
+
 USER bun
-ENTRYPOINT [ "bun", "run", "main.ts" ]
+CMD ["bun", "slack.ts"]
