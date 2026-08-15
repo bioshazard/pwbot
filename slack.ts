@@ -429,6 +429,11 @@ let castVote: (
   optionId: string,
   userId: string
 ) => Poll | undefined = () => uninitialized("castVote");
+let removeVote: (
+  pollId: string,
+  optionId: string,
+  userId: string
+) => Poll | undefined = () => uninitialized("removeVote");
 let closePoll: (pollId: string, userId: string) => Poll | undefined = () =>
   uninitialized("closePoll");
 let addPollOption: (pollId: string, label: string) => Poll | undefined = () =>
@@ -666,6 +671,39 @@ app.action("poll_vote", async ({ ack, body, action, client }) => {
   });
 });
 
+app.action("poll_remove_vote", async ({ ack, body, action, client }) => {
+  await ack();
+  const parsedBody = pollActionBodySchema.safeParse(body);
+  const value = actionValue(action);
+  if (!parsedBody.success || value === undefined) {
+    return;
+  }
+  const { container, user } = parsedBody.data;
+  const [pollId, optionId] = value.split(":");
+  if (
+    pollId === undefined ||
+    pollId.length === 0 ||
+    optionId === undefined ||
+    optionId.length === 0
+  ) {
+    return;
+  }
+  const poll = removeVote(pollId, optionId, user.id);
+  if (
+    poll === undefined ||
+    container.channel_id === undefined ||
+    container.message_ts === undefined
+  ) {
+    return;
+  }
+  await client.chat.update({
+    blocks: renderPoll(poll),
+    channel: container.channel_id,
+    text: poll.question,
+    ts: container.message_ts,
+  });
+});
+
 app.action("poll_close", async ({ ack, body, action, client }) => {
   await ack();
   const parsedBody = pollActionBodySchema.safeParse(body);
@@ -857,6 +895,45 @@ castVote = (
   return updated;
 };
 
+removeVote = (
+  pollId: string,
+  optionId: string,
+  userId: string
+): Poll | undefined => {
+  let updated: Poll | undefined;
+  const remove = db.transaction(() => {
+    const poll = getPoll(pollId);
+    if (
+      !poll ||
+      poll.status !== "open" ||
+      !poll.options.some((option) => option.id === optionId)
+    ) {
+      return;
+    }
+    const vote = db
+      .query<unknown, [string, string, string]>(
+        "SELECT votes FROM poll_votes WHERE poll_id = ? AND user_id = ? AND option_id = ?"
+      )
+      .get(pollId, userId, optionId);
+    const count = z.object({ votes: z.number() }).safeParse(vote);
+    if (!count.success) {
+      return;
+    }
+    if (count.data.votes === 1) {
+      db.prepare(
+        "DELETE FROM poll_votes WHERE poll_id = ? AND user_id = ? AND option_id = ?"
+      ).run(pollId, userId, optionId);
+    } else {
+      db.prepare(
+        "UPDATE poll_votes SET votes = votes - 1 WHERE poll_id = ? AND user_id = ? AND option_id = ?"
+      ).run(pollId, userId, optionId);
+    }
+    updated = getPoll(pollId);
+  });
+  remove();
+  return updated;
+};
+
 addPollOption = (pollId: string, label: string): Poll | undefined => {
   let updated: Poll | undefined;
   const add = db.transaction(() => {
@@ -996,7 +1073,18 @@ renderPoll = (poll: Poll) => {
             type: "button",
             value: `${poll.id}:${option.id}`,
           };
-          return { elements: [button], type: "actions" as const };
+          return {
+            elements: [
+              button,
+              {
+                action_id: "poll_remove_vote",
+                text: { text: "−", type: "plain_text" as const },
+                type: "button" as const,
+                value: `${poll.id}:${option.id}`,
+              },
+            ],
+            type: "actions" as const,
+          };
         })
       : []),
     ...poll.options.map((option) => {
