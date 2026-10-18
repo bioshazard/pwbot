@@ -1,57 +1,48 @@
-import { env } from "node:process";
+import { BunRuntime, BunServices } from "@effect/platform-bun";
+import { Config, Effect, FileSystem, Redacted, Schema } from "effect";
+import {
+  FetchHttpClient,
+  HttpClient,
+  HttpClientRequest,
+  HttpClientResponse,
+} from "effect/http";
 
-import { z } from "zod";
+import { SlackError } from "../lib/errors";
 
-const required = (name: string): string => {
-  const value = env[name]?.trim();
-  if (value === undefined || value.length === 0) {
-    throw new Error(`${name} is required`);
-  }
-  return value;
-};
-
-const manifestResultSchema = z.object({
-  error: z.string().optional(),
-  errors: z
-    .array(
-      z.object({
-        message: z.string().optional(),
-        pointer: z.string().optional(),
-      })
-    )
-    .optional(),
-  ok: z.boolean().optional(),
-  permissions_updated: z.boolean().optional(),
+const Result = Schema.Struct({
+  ok: Schema.optional(Schema.Boolean),
+  permissions_updated: Schema.optional(Schema.Boolean),
 });
-
-const token = required("SLACK_APP_CONFIG_TOKEN");
-const appId = required("SLACK_APP_ID");
-const manifest = await Bun.file("slack-manifest.json").text();
-
-const response = await fetch("https://slack.com/api/apps.manifest.update", {
-  body: JSON.stringify({ app_id: appId, manifest }),
-  headers: {
-    Authorization: `Bearer ${token}`,
-    "Content-Type": "application/json; charset=utf-8",
-  },
-  method: "POST",
-});
-const result = manifestResultSchema.parse(await response.json());
-
-if (!response.ok || result.ok !== true) {
-  const details = result.errors
-    ?.map(
-      (error) => `${error.pointer ?? "manifest"}: ${error.message ?? "invalid"}`
-    )
-    .join("; ");
-  throw new Error(
-    `Slack manifest update failed: ${result.error ?? response.statusText}${details === undefined || details.length === 0 ? "" : ` (${details})`}`
+const program = Effect.gen(function* applyManifest() {
+  const token = yield* Config.Redacted("SLACK_APP_CONFIG_TOKEN");
+  const appId = yield* Config.NonEmptyString("SLACK_APP_ID");
+  const fs = yield* FileSystem.FileSystem;
+  const manifest = yield* fs.readFileString("slack-manifest.json");
+  const client = (yield* HttpClient.HttpClient).pipe(HttpClient.filterStatusOk);
+  const result = yield* HttpClientRequest.post(
+    "https://slack.com/api/apps.manifest.update"
+  ).pipe(
+    HttpClientRequest.setHeader(
+      "Authorization",
+      `Bearer ${Redacted.value(token)}`
+    ),
+    HttpClientRequest.bodyJsonUnsafe({ app_id: appId, manifest }),
+    client.execute,
+    Effect.flatMap(HttpClientResponse.schemaBodyJson(Result))
   );
-}
-
-console.log(
-  JSON.stringify({
+  if (result.ok !== true) {
+    return yield* new SlackError({
+      operation: "apps.manifest.update rejected manifest",
+    });
+  }
+  yield* Effect.logInfo("Applied Slack manifest", {
     appId,
     permissionsUpdated: result.permissions_updated ?? false,
-  })
+  });
+}).pipe(
+  Effect.timeout("30 seconds"),
+  Effect.mapError(() => new SlackError({ operation: "apps.manifest.update" })),
+  Effect.provide(FetchHttpClient.layer),
+  Effect.provide(BunServices.layer)
 );
+BunRuntime.runMain(program);

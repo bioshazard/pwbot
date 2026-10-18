@@ -1,22 +1,33 @@
 {
   "name": "pwbot",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "bun --env-file=.env.dev slack.ts",
-    "dev": "bun --watch --env-file=.env.dev slack.ts",
-    "test:greeting": "bun --env-file=.env.dev test test/greeting.integration.test.ts",
+    "start": "bun --env-file=.env.dev main.ts",
+    "dev": "bun --watch --env-file=.env.dev main.ts",
+    "test:greeting": "RUN_LIVE_TESTS=1 DATABASE_PATH=:memory: bun --env-file=.env.dev test test/greeting.integration.test.ts",
     "manifest:apply": "bun --env-file=.env.dev scripts/apply-manifest.ts",
     "typecheck": "bunx --bun tsc --noEmit",
     "format": "bunx --bun oxfmt .",
     "format:check": "bunx --bun oxfmt --check .",
     "lint": "bunx --bun ultracite check --type-aware --type-check",
     "check": "bun run format:check && bun run lint && bun run typecheck",
-    "fix": "bunx --bun ultracite fix --type-aware --type-check"
+    "fix": "bunx --bun ultracite fix --type-aware --type-check",
+    "test": "bun --no-env-file test test/unit",
+    "verify:gateway": "bun --no-env-file scripts/verify-gateway.ts",
+    "slack:authorize": "bun --env-file=.env.dev scripts/authorize-slack.ts",
+    "slack:config:refresh": "bun --env-file=.env.dev scripts/refresh-slack-config.ts"
   },
   "dependencies": {
+    "@earendil-works/pi-agent-core": "1.3.0",
+    "@earendil-works/pi-ai": "1.3.0",
+    "@effect/platform-bun": "4.0.5",
+    "@effect/sql-sqlite-bun": "4.0.5",
+    "@modelcontextprotocol/sdk": "1.32.1",
     "@slack/bolt": "^4.7.3",
-    "zod": "^4.4.3"
+    "effect": "4.0.5",
+    "xstate": "5.33.3"
   },
   "devDependencies": {
     "@types/bun": "^1.3.14",

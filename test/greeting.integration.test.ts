@@ -1,16 +1,20 @@
 import { expect, test } from "bun:test";
 
-import { generateReply } from "../reply";
+import { Effect } from "effect";
 
-test("incoming greeting receives a model reply", async () => {
-  const startedAt = performance.now();
-  const reply = await generateReply({
-    getKarma: () => 0,
-    thread: "<@U_TEST>: Hello, PW Bot!",
-    userId: "U_TEST",
-  });
-  const elapsedMs = Math.round(performance.now() - startedAt);
+import { AppLive } from "../lib/layers";
+import { Replies } from "../reply";
 
-  console.log(`Reply (${elapsedMs}ms): ${reply}`);
-  expect(reply.trim()).not.toBeEmpty();
-}, 125_000);
+test.skipIf(process.env.RUN_LIVE_TESTS !== "1")(
+  "incoming greeting receives a model reply",
+  async () => {
+    const reply = await Effect.runPromise(
+      Effect.gen(function* testConfig() {
+        const replies = yield* Replies;
+        return yield* replies.generate("<@UTEST>: Hello, PW Bot!", "UTEST");
+      }).pipe(Effect.provide(AppLive))
+    );
+    expect(reply.trim()).not.toBeEmpty();
+  },
+  125_000
+);

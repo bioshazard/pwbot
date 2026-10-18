@@ -4,3 +4,8 @@
 node_modules
 log.out
 pwbot.sqlite*
+.slack-mcp
+
+.local
+*.sqlite*
+*.db*
