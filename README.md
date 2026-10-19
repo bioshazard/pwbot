@@ -55,7 +55,9 @@ Optional configuration:
 | `AGENT_MAX_TOOL_CALLS` | `48` attempted tools per reply, including invalid calls |
 | `DEBUG` | `false`; set `1` for correlated reply lifecycle/tool/stage diagnostics |
 | `DATABASE_PATH` | `pwbot.sqlite` |
-| `POLL_COMMAND` | `/pwpoll` |
+| `POLL_COMMAND` | `/pwpoll`; used by both the runtime and manifest renderer |
+| `SLACK_APP_NAME` | Manifest-only optional override for app and bot display names |
+| `SLACK_MANIFEST_PATH` | Manifest-only input file; defaults to `slack-manifest.json` |
 | `LITELLM_MCP_ENABLED` | Unset; `true` derives `/mcp` from the model gateway origin, `false` disables gateway tools |
 | `LITELLM_MCP_URL` | Optional explicit MCP endpoint; enables tools unless explicitly disabled |
 | `SLACK_ARCHIVE_MCP_URL`, `SLACK_ARCHIVE_ENABLED` | Legacy scoped-endpoint fallback when new gateway settings are absent |
@@ -240,7 +242,13 @@ The image defaults SQLite to `/data/pwbot.sqlite`. Mount `/data` to retain state
 ## Manifest and release
 
 Set `SLACK_APP_CONFIG_TOKEN` and `SLACK_APP_ID`, then run
-`bun run manifest:apply` to replace the full manifest. Configuration tokens expire
+`bun run manifest:apply` to validate and replace the full manifest. The command
+renders `POLL_COMMAND` into the poll command and optionally applies `SLACK_APP_NAME`
+to both display names. For an existing app, export/review its complete manifest
+first and point `SLACK_MANIFEST_PATH` at that file to preserve its other settings.
+Use `/dev-pwpoll` with `SLACK_APP_NAME="PW Bot JS Dev"` for development in a shared
+workspace; leave production at `/pwpoll`. Slack command names are workspace-wide,
+so two apps must not register the same command. Configuration tokens expire
 after 12 hours. Store the matching refresh token as
 `SLACK_APP_CONFIG_REFRESH_TOKEN` in `.env.dev`. Run
 `bun run slack:config:refresh` to rotate and atomically save both tokens to that

@@ -14,6 +14,13 @@ const read = (values: Record<string, string>) =>
       )
     )
   );
+test("development command is explicit and production keeps its default", async () => {
+  const production = await read({});
+  const development = await read({ POLL_COMMAND: "/dev-pwpoll" });
+  expect(production.pollCommand).toBe("/pwpoll");
+  expect(development.pollCommand).toBe("/dev-pwpoll");
+  await expect(read({ POLL_COMMAND: "dev pwpoll" })).rejects.toBeDefined();
+});
 test("config accepts positive numeric environment strings", async () => {
   const config = await read({
     AGENT_MAX_TURNS: "3",

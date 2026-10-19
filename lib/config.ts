@@ -3,6 +3,11 @@ import { Config, Context, Effect, Layer, Option, Schema } from "effect";
 import { fallbackContextWindow, resolveModelContext } from "./model-context";
 import { optionalText } from "./optional-config";
 
+export const pollCommandConfig = Config.schema(
+  Schema.String.check(Schema.isPattern(/^\/[a-z0-9_-]+$/u)),
+  "POLL_COMMAND"
+).pipe(Config.withDefault("/pwpoll"));
+
 const positiveInt = (name: string, fallback: number) =>
   Config.schema(Schema.Int.check(Schema.isGreaterThan(0)), name).pipe(
     Config.withDefault(fallback)
@@ -90,9 +95,7 @@ const make = Effect.gen(function* readConfig() {
       Config.withDefault("gpt-4o")
     ),
     modelTimeoutMs: yield* positiveInt("MODEL_CALL_TIMEOUT_MS", 90_000),
-    pollCommand: yield* Config.NonEmptyString("POLL_COMMAND").pipe(
-      Config.withDefault("/pwpoll")
-    ),
+    pollCommand: yield* pollCommandConfig,
     timeoutMs: yield* positiveInt("OPENAI_TIMEOUT_MS", 600_000),
     toolTimeoutMs: yield* positiveInt("TOOL_CALL_TIMEOUT_MS", 30_000),
   };
