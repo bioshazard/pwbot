@@ -49,8 +49,8 @@ Optional configuration:
 | `OPENAI_TIMEOUT_MS` | `600000`, discovery and the entire agent run |
 | `MODEL_CALL_TIMEOUT_MS` | `90000`, each model request including streaming |
 | `TOOL_CALL_TIMEOUT_MS` | `30000`, each tool execution |
-| `OPENAI_MAX_TOKENS` | `4096` |
-| `OPENAI_CONTEXT_WINDOW` | Override; otherwise upstream metadata, then `8192` if unavailable |
+| `OPENAI_MAX_TOKENS` | Override; otherwise announced output limit, then `8192` |
+| `OPENAI_CONTEXT_WINDOW` | Override; otherwise upstream metadata, then `32768` |
 | `AGENT_MAX_TURNS` | `16` provider requests per reply |
 | `AGENT_MAX_TOOL_CALLS` | `48` attempted tools per reply, including invalid calls |
 | `DEBUG` | `false`; set `1` for correlated reply lifecycle/tool/stage diagnostics |
@@ -85,22 +85,27 @@ Release one of issue #4 covers bounded in-process replies and progress. The
 posting use their transport defaults. Model requests have a separate 90-second
 wall-clock limit; tool executions have a 30-second limit. MCP discovery/calls also
 retain the SDK's 30-second limit, so raising the tool limit cannot extend MCP's
-own deadline. The first limit reached wins. An explicit `OPENAI_CONTEXT_WINDOW`
-override wins; otherwise startup checks `/model/info`, then the model API's
+own deadline. The first limit reached wins. Context and output limits resolve
+independently: an explicit `OPENAI_CONTEXT_WINDOW` or `OPENAI_MAX_TOKENS` override
+wins for that limit; otherwise startup checks `/model/info`, then the model API's
 `models` endpoint for the selected alias. Metadata lookup is limited to three
-seconds total. Missing, invalid, inaccessible or timed-out metadata falls back to
-8192 tokens with a warning. Multiple deployments sharing an alias use the smallest
-announced capacity; an unknown capacity prevents inference. Output-only limits
-are not treated as context capacity. Startup logs the resolved capacity and source;
-restart to refresh metadata after changing the upstream alias. `OPENAI_MAX_TOKENS`
-remains a separate 4096-token reply policy. Pi estimates input size and reserves
+seconds total. Missing, invalid, inaccessible or timed-out announcements fall
+back to **32,768 context tokens** and **8,192 output tokens**, independently.
+An already discovered limit survives failure of the next metadata endpoint.
+Multiple deployments sharing an alias use the smallest announced limit for each
+kind; missing deployment limits prevent inference for that kind. Only explicit
+`max_output_tokens` announcements determine output limits; output-only metadata
+never determines context capacity. Startup logs both limits and their sources;
+restart to refresh metadata after changing the upstream alias. Pi estimates input
+size and reserves
 4096 safety tokens, then clamps the request's output budget to remaining context.
 Before sending, the bot requires room for at least `min(OPENAI_MAX_TOKENS, 1024)`
 answer tokens. Smaller budgets fail distinctly as context exhaustion instead of
 silently requesting a one-token answer. `DEBUG=1` logs configured/effective output
 budgets for each request. A provider's `length` stop remains output exhaustion;
 it is not automatically retried because tool arguments may be incomplete. Tool
-batches that exceed the remaining budget stop before executing that batch. Sixteen turns and 48 attempted calls
+batches that exceed the remaining budget stop before executing that batch. Sixteen
+turns and 48 attempted calls
 allow multi-step research while bounding repeated invalid requests. Narrow the
 question or explicitly raise the relevant limit when a legitimate run exhausts it.
 

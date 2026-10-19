@@ -39,9 +39,12 @@ test("env override wins and never requests model metadata", async () => {
   try {
     const config = await read(`${server.url.origin}/v1`, {
       OPENAI_CONTEXT_WINDOW: "16000",
+      OPENAI_MAX_TOKENS: "12000",
     });
     expect(config.contextWindow).toBe(16_000);
     expect(config.contextWindowSource).toBe("override");
+    expect(config.maxTokens).toBe(12_000);
+    expect(config.maxTokensSource).toBe("override");
     expect(requests).toBe(0);
   } finally {
     await server.stop(true);
@@ -63,8 +66,8 @@ test("startup resolves the selected alias from proxy metadata, preserving URL pr
     const config = await read(`${server.url.origin}/proxy/v1`);
     expect(config.contextWindow).toBe(150_000);
     expect(config.contextWindowSource).toBe("upstream");
-    expect(config.maxTokens).toBe(4096);
-    expect(paths).toEqual(["/proxy/model/info"]);
+    expect(config.maxTokens).toBe(8192);
+    expect(paths).toEqual(["/proxy/model/info", "/proxy/v1/models"]);
   } finally {
     await server.stop(true);
   }
@@ -113,7 +116,7 @@ test("shared aliases use the smallest announced deployment window", async () => 
   }
 });
 
-test("missing, malformed and output-only announcements fall back to 8192", async () => {
+test("missing, malformed and output-only announcements fall back to 32768", async () => {
   const responses = [
     { data: [] },
     {
@@ -154,7 +157,7 @@ test("missing, malformed and output-only announcements fall back to 8192", async
       });
       try {
         const config = await read(`${server.url.origin}/v1`);
-        expect(config.contextWindow).toBe(8192);
+        expect(config.contextWindow).toBe(32_768);
         expect(config.contextWindowSource).toBe("fallback");
       } finally {
         await server.stop(true);
@@ -163,7 +166,7 @@ test("missing, malformed and output-only announcements fall back to 8192", async
   );
 });
 
-test("metadata failures are sanitized and retain the 8192 fallback", async () => {
+test("metadata failures are sanitized and retain the 32768 context fallback", async () => {
   const server = Bun.serve({
     fetch: () => new Response("private upstream payload", { status: 403 }),
     hostname: "127.0.0.1",
@@ -171,7 +174,7 @@ test("metadata failures are sanitized and retain the 8192 fallback", async () =>
   });
   try {
     const config = await read(`${server.url.origin}/v1`);
-    expect(config.contextWindow).toBe(8192);
+    expect(config.contextWindow).toBe(32_768);
   } finally {
     await server.stop(true);
   }
@@ -192,15 +195,195 @@ test("a stalled metadata response is bounded and falls back", async () => {
         {
           apiKey: Redacted.make("test-key"),
           baseUrl: `${server.url.origin}/v1`,
-          contextWindow: 8192,
+          contextWindow: 32_768,
           contextWindowSource: "fallback",
+          maxTokens: 8192,
+          maxTokensSource: "fallback",
           model: "fixture-model",
         },
         20
       )
     );
-    expect(config.contextWindow).toBe(8192);
+    expect(config.contextWindow).toBe(32_768);
     expect(config.contextWindowSource).toBe("fallback");
+  } finally {
+    await server.stop(true);
+  }
+});
+
+test("context and output overrides take precedence independently", async () => {
+  const server = Bun.serve({
+    fetch: () =>
+      Response.json({
+        data: [
+          {
+            model_info: {
+              max_input_tokens: 150_000,
+              max_output_tokens: 24_000,
+            },
+            model_name: "fixture-model",
+          },
+        ],
+      }),
+    hostname: "127.0.0.1",
+    port: 0,
+  });
+  try {
+    const [announced, contextOverride, outputOverride] = await Promise.all([
+      read(`${server.url.origin}/v1`),
+      read(`${server.url.origin}/v1`, { OPENAI_CONTEXT_WINDOW: "64000" }),
+      read(`${server.url.origin}/v1`, { OPENAI_MAX_TOKENS: "16000" }),
+    ]);
+    expect(announced).toMatchObject({
+      contextWindow: 150_000,
+      contextWindowSource: "upstream",
+      maxTokens: 24_000,
+      maxTokensSource: "upstream",
+    });
+    expect(contextOverride).toMatchObject({
+      contextWindow: 64_000,
+      contextWindowSource: "override",
+      maxTokens: 24_000,
+      maxTokensSource: "upstream",
+    });
+    expect(outputOverride).toMatchObject({
+      contextWindow: 150_000,
+      contextWindowSource: "upstream",
+      maxTokens: 16_000,
+      maxTokensSource: "override",
+    });
+  } finally {
+    await server.stop(true);
+  }
+});
+
+test("output-only announcements leave context at 32K and invalid output leaves it at 8K", async () => {
+  const responses = [
+    { data: [{ id: "fixture-model", max_output_tokens: 24_000 }] },
+    {
+      data: [
+        {
+          id: "fixture-model",
+          max_input_tokens: 64_000,
+          max_output_tokens: "bad",
+        },
+      ],
+    },
+  ];
+  const results = await Promise.all(
+    responses.map(async (response) => {
+      const server = Bun.serve({
+        fetch: () => Response.json(response),
+        hostname: "127.0.0.1",
+        port: 0,
+      });
+      try {
+        return await read(`${server.url.origin}/v1`);
+      } finally {
+        await server.stop(true);
+      }
+    })
+  );
+  expect(results[0]).toMatchObject({
+    contextWindow: 32_768,
+    contextWindowSource: "fallback",
+    maxTokens: 24_000,
+    maxTokensSource: "upstream",
+  });
+  expect(results[1]).toMatchObject({
+    contextWindow: 64_000,
+    contextWindowSource: "upstream",
+    maxTokens: 8192,
+    maxTokensSource: "fallback",
+  });
+});
+
+test("metadata endpoints can supply context and output separately", async () => {
+  const server = Bun.serve({
+    fetch: (request) =>
+      Response.json(
+        new URL(request.url).pathname === "/model/info"
+          ? catalog(64_000)
+          : { data: [{ id: "fixture-model", max_output_tokens: 16_000 }] }
+      ),
+    hostname: "127.0.0.1",
+    port: 0,
+  });
+  try {
+    const config = await read(`${server.url.origin}/v1`);
+    expect(config).toMatchObject({
+      contextWindow: 64_000,
+      contextWindowSource: "upstream",
+      maxTokens: 16_000,
+      maxTokensSource: "upstream",
+    });
+  } finally {
+    await server.stop(true);
+  }
+});
+
+test("shared aliases use the smallest output limit too", async () => {
+  const server = Bun.serve({
+    fetch: () =>
+      Response.json({
+        data: [
+          {
+            model_info: {
+              max_input_tokens: 150_000,
+              max_output_tokens: 32_000,
+            },
+            model_name: "fixture-model",
+          },
+          {
+            model_info: { max_input_tokens: 64_000, max_output_tokens: 16_000 },
+            model_name: "fixture-model",
+          },
+        ],
+      }),
+    hostname: "127.0.0.1",
+    port: 0,
+  });
+  try {
+    const config = await read(`${server.url.origin}/v1`);
+    expect(config).toMatchObject({ contextWindow: 64_000, maxTokens: 16_000 });
+  } finally {
+    await server.stop(true);
+  }
+});
+
+test("a stalled second endpoint preserves an already announced limit", async () => {
+  const server = Bun.serve({
+    fetch: async (request) => {
+      if (new URL(request.url).pathname === "/model/info") {
+        return Response.json(catalog(64_000));
+      }
+      await Bun.sleep(100);
+      return Response.json({ data: [] });
+    },
+    hostname: "127.0.0.1",
+    port: 0,
+  });
+  try {
+    const config = await Effect.runPromise(
+      resolveModelContext(
+        {
+          apiKey: Redacted.make("test-key"),
+          baseUrl: `${server.url.origin}/v1`,
+          contextWindow: 32_768,
+          contextWindowSource: "fallback",
+          maxTokens: 8192,
+          maxTokensSource: "fallback",
+          model: "fixture-model",
+        },
+        40
+      )
+    );
+    expect(config).toMatchObject({
+      contextWindow: 64_000,
+      contextWindowSource: "upstream",
+      maxTokens: 8192,
+      maxTokensSource: "fallback",
+    });
   } finally {
     await server.stop(true);
   }

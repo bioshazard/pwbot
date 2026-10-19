@@ -1,6 +1,10 @@
 import { Config, Context, Effect, Layer, Option, Schema } from "effect";
 
-import { fallbackContextWindow, resolveModelContext } from "./model-context";
+import {
+  fallbackContextWindow,
+  fallbackOutputTokens,
+  resolveModelContext,
+} from "./model-context";
 import { optionalText } from "./optional-config";
 
 export const pollCommandConfig = Config.schema(
@@ -73,6 +77,10 @@ const make = Effect.gen(function* readConfig() {
     Schema.Int.check(Schema.isGreaterThan(0)),
     "OPENAI_CONTEXT_WINDOW"
   ).pipe(Config.option);
+  const outputOverride = yield* Config.schema(
+    Schema.Int.check(Schema.isGreaterThan(0)),
+    "OPENAI_MAX_TOKENS"
+  ).pipe(Config.option);
   return {
     apiKey: yield* Config.Redacted("OPENAI_API_KEY"),
     ...gateway,
@@ -88,7 +96,10 @@ const make = Effect.gen(function* readConfig() {
       Config.withDefault("pwbot.sqlite")
     ),
     debug: yield* Config.Boolean("DEBUG").pipe(Config.withDefault(false)),
-    maxTokens: yield* positiveInt("OPENAI_MAX_TOKENS", 4096),
+    maxTokens: Option.getOrElse(outputOverride, () => fallbackOutputTokens),
+    maxTokensSource: Option.isSome(outputOverride)
+      ? ("override" as const)
+      : ("fallback" as const),
     maxToolCalls: yield* positiveInt("AGENT_MAX_TOOL_CALLS", 48),
     maxTurns: yield* positiveInt("AGENT_MAX_TURNS", 16),
     model: yield* Config.NonEmptyString("OPENAI_API_MODEL").pipe(

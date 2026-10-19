@@ -108,6 +108,7 @@ test("Pi executes karma through the real OpenAI-compatible wire protocol", async
             OPENAI_API_KEY: "test-key",
             OPENAI_API_MODEL: "test-model",
             OPENAI_CONTEXT_WINDOW: "16384",
+            OPENAI_MAX_TOKENS: "8192",
           })
         )
       )
@@ -364,6 +365,7 @@ test("overall deadline is distinct from an individual call timeout", async () =>
               OPENAI_API_BASE: `${server.url.origin}/v1`,
               OPENAI_API_KEY: "test-key",
               OPENAI_CONTEXT_WINDOW: "16384",
+              OPENAI_MAX_TOKENS: "8192",
               OPENAI_TIMEOUT_MS: "20",
             })
           )
@@ -462,7 +464,7 @@ test("the same large research context completes with an accurately configured wi
   }
 });
 
-test("replies resolve announced capacity once and retain their configured output budget", async () => {
+test("replies resolve announced context and output once and use both on the wire", async () => {
   let metadataRequests = 0;
   const budgets: number[] = [];
   const server = Bun.serve({
@@ -472,7 +474,10 @@ test("replies resolve announced capacity once and retain their configured output
         return Response.json({
           data: [
             {
-              model_info: { max_input_tokens: 64_000 },
+              model_info: {
+                max_input_tokens: 64_000,
+                max_output_tokens: 16_384,
+              },
               model_name: "test-model",
             },
           ],
@@ -508,7 +513,7 @@ test("replies resolve announced capacity once and retain their configured output
       )
     );
     expect(metadataRequests).toBe(1);
-    expect(budgets).toEqual([4096, 4096]);
+    expect(budgets).toEqual([16_384, 16_384]);
   } finally {
     await server.stop(true);
   }
