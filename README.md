@@ -20,7 +20,7 @@ OpenAI-compatible transport, using the current `@earendil-works` packages.
 - `reply.ts`, `lib/reply-machine.ts`: per-reply Pi agent and XState lifecycle.
 - `lib/tool-sources.ts`: capability port consumed by reply generation.
 - `lib/layers.ts`: selects and composes enabled/disabled tool-source adapters.
-- `lib/archive.ts`, `lib/live-slack.ts`: optional MCP adapters; core reply logic
+- `lib/gateway-mcp.ts`, `lib/live-slack.ts`: optional MCP adapters; core reply logic
   does not import either adapter or read their environment configuration.
 - `lib/store.ts`, `lib/migrations.ts`: Effect SQL repository and SQLite migration.
 - `lib/poll-ui.ts`: poll blocks and modal helpers.
@@ -51,8 +51,9 @@ Optional configuration:
 | `AGENT_MAX_TOOL_CALLS` | `24` executed tools per reply |
 | `DATABASE_PATH` | `pwbot.sqlite` |
 | `POLL_COMMAND` | `/pwpoll` |
-| `SLACK_ARCHIVE_ENABLED` | `false` overrides an archive URL and disables this adapter |
-| `SLACK_ARCHIVE_MCP_URL` | Unset; setting an HTTP(S) URL enables archive tools |
+| `LITELLM_MCP_ENABLED` | Unset; `true` derives `/mcp` from the model gateway origin, `false` disables gateway tools |
+| `LITELLM_MCP_URL` | Optional explicit MCP endpoint; enables tools unless explicitly disabled |
+| `SLACK_ARCHIVE_MCP_URL`, `SLACK_ARCHIVE_ENABLED` | Legacy scoped-endpoint fallback when new gateway settings are absent |
 | `SLACK_APP_ID`, `SLACK_CLIENT_ID`, `SLACK_CLIENT_SECRET` | All three required to enable live Slack MCP |
 | `SLACK_LIVE_MCP_ENABLED` | `false` disables live Slack MCP even when configured |
 | `SLACK_MCP_CREDENTIALS_DIR` | `.slack-mcp` locally; image uses `/data/slack-mcp` |
@@ -70,38 +71,50 @@ messages. `bun run test:greeting` explicitly opts into a real completion using
 environment configuration to check read-only archive status and a model-driven
 karma call against an in-memory fixture, without loading dotenv or writing Slack.
 
-## Tools and archive gateway
+## Tools and MCP gateway
 
 `getKarma` reads current local SQLite karma. Archive history never replaces it.
 Pi validates arguments and executes tools sequentially. Replies have bounded
 provider turns, tool executions, output tokens, and total duration.
 
 For an OpenAI-compatible gateway, configure its base URL and model explicitly.
-For an archive exposed through LiteLLM, a typical configuration is:
+For MCP tools exposed through LiteLLM, a typical configuration is:
 
 ```dotenv
 OPENAI_API_BASE=https://gateway.example.com/v1
 OPENAI_API_MODEL=your-model-alias
-SLACK_ARCHIVE_MCP_URL=https://gateway.example.com/slack_archive/mcp
+LITELLM_MCP_ENABLED=true
 ```
 
-The archive endpoint is outside `/v1`. This adapter uses **Streamable HTTP**
-with `x-litellm-api-key: Bearer <OPENAI_API_KEY>`. Configure the gateway key to
-allow the intended inference routes and archive MCP server. Permission alone
-does not advertise tools. The gateway hostname does not automatically enable
-archive tools; the MCP URL must be set. `SLACK_ARCHIVE_ENABLED=false` overrides it.
+The MCP endpoint is outside `/v1`: this example derives
+`https://gateway.example.com/mcp`. Set `LITELLM_MCP_URL` for an explicit endpoint,
+including a scoped server or access group. The adapter uses **Streamable HTTP**
+with `x-litellm-api-key: Bearer <OPENAI_API_KEY>`.
 
 Each reply opens a scoped session, follows `tools/list` pagination, and exposes
-only archive_status, list_channels, search, get_message, get_thread, get_context.
-Gateway prefixes and discovered JSON schemas are preserved. Pi sends these tool
-declarations to the model and dispatches calls through MCP. Key permission alone
-does not advertise or execute tools. Missing/invalid archive configuration logs
-a startup warning and selects the disabled adapter. Unavailable optional discovery logs a warning and omits its
-tools, allowing normal replies to continue without implying a search occurred.
+all tools the gateway returns for that key. Server-prefixed names and JSON
+schemas are preserved; no per-server URLs, tool counts, or application allowlists
+are required. Granting another server/tool to the same key takes effect on the
+next reply. Replacing the key in the environment requires a process restart.
 
-Tools retain structured data, generation guards, citations, and metadata.
-Oversized results ask the model to narrow retrieval. Historical content is
-untrusted; the archive is a snapshot, not live Slack or complete history.
+LiteLLM controls server/tool access through key policy. Gateway tools are not
+assumed read-only; restrict the key's grants to the capabilities you intend to
+expose. The bot's direct live-Slack integration retains its separate read-only
+allowlist and per-user OAuth grants.
+
+Missing/invalid gateway configuration logs a startup warning and selects the
+disabled adapter. Unavailable discovery logs a warning and omits gateway tools,
+allowing normal replies to continue without implying a search occurred. An empty
+catalog is valid when the key has no tool grants. `LITELLM_MCP_ENABLED=false`
+disables gateway tools even when a URL is set. Legacy `SLACK_ARCHIVE_MCP_URL`
+remains a fallback when new gateway settings are absent; it stays scoped to that
+endpoint. The model hostname alone never enables MCP access.
+
+Tool results retain structured data, generation guards, citations, and metadata.
+Oversized results ask the model to narrow retrieval. Tool content is untrusted;
+Slack archive tools represent a historical snapshot, while other gateway tools
+retain their own source semantics. Pi sends the discovered declarations to the
+model and dispatches selected calls through MCP.
 
 ## Live Slack MCP
 

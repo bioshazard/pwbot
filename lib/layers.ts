@@ -1,8 +1,8 @@
 import { Effect, Layer } from "effect";
 
 import { Replies } from "../reply";
-import { Archive } from "./archive";
 import { BotConfig } from "./config";
+import { GatewayMcp } from "./gateway-mcp";
 import { LiveSlack } from "./live-slack";
 import { SlackMcpCredentials } from "./slack-mcp-credentials";
 import { SlackMcpSettings } from "./slack-mcp-settings";
@@ -29,27 +29,27 @@ export const LiveSlackServices = Layer.unwrap(
 export const ToolSourcesLive = Layer.effect(
   ToolSources,
   Effect.gen(function* composeToolSources() {
-    const archive = yield* Archive;
+    const gateway = yield* GatewayMcp;
     const liveSlack = yield* LiveSlack;
     return {
       open: Effect.fn("ToolSources.open")(function* openToolSources(
         context: ToolContext
       ) {
-        const archived = yield* archive.open;
+        const gatewaySession = yield* gateway.open;
         const live = yield* liveSlack.open(context.teamId, context.userId);
         return {
           discover: async (signal: AbortSignal) => {
-            const [archiveTools, liveTools] = await Promise.all([
-              archived.discover(signal),
+            const [gatewayTools, liveTools] = await Promise.all([
+              gatewaySession.discover(signal),
               live.discover(signal),
             ]);
-            return [...archiveTools, ...liveTools];
+            return [...gatewayTools, ...liveTools];
           },
         };
       }),
     };
   })
-).pipe(Layer.provide(Layer.mergeAll(Archive.layer, LiveSlackServices)));
+).pipe(Layer.provide(Layer.mergeAll(GatewayMcp.layer, LiveSlackServices)));
 const ServicesLive = Layer.mergeAll(StorageLive, ToolSourcesLive);
 const RepliesLive = Replies.layer.pipe(Layer.provideMerge(ServicesLive));
 export const AppLive = RepliesLive.pipe(Layer.provideMerge(BotConfig.layer));

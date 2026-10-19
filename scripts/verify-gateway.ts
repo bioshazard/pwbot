@@ -1,15 +1,15 @@
 import { BunRuntime } from "@effect/platform-bun";
 import { Effect, Layer } from "effect";
 
-import { Archive } from "../lib/archive";
 import { BotConfig } from "../lib/config";
 import { ReplyError } from "../lib/errors";
+import { GatewayMcp } from "../lib/gateway-mcp";
 import { karmaTool, runAgent, runReplyMachine } from "../reply";
 
 // Explicit smoke check: model + read-only archive status, never Slack messages or live karma writes.
 const program = Effect.gen(function* verifyGateway() {
   const config = yield* BotConfig;
-  const archive = yield* Archive;
+  const archive = yield* GatewayMcp;
   const session = yield* archive.open;
   let karmaCalls = 0;
   let archiveCalls = 0;
@@ -69,7 +69,7 @@ const program = Effect.gen(function* verifyGateway() {
 }).pipe(
   Effect.scoped,
   Effect.mapError(() => new ReplyError({ reason: "model" })),
-  Effect.provide(Archive.layer.pipe(Layer.provideMerge(BotConfig.layer)))
+  Effect.provide(GatewayMcp.layer.pipe(Layer.provideMerge(BotConfig.layer)))
 );
 
 BunRuntime.runMain(program);

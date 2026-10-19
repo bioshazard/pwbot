@@ -523,8 +523,8 @@ export const SlackLive = Layer.effectDiscard(
     });
     yield* call("start", async () => await app.start());
     yield* Effect.logInfo("PW Bot is running", {
-      archiveEnabled: Boolean(config.archiveUrl),
       botUserId,
+      gatewayMcpEnabled: Boolean(config.gatewayMcpUrl),
     });
   })
 );

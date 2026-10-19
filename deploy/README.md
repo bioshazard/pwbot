@@ -14,9 +14,12 @@ Before applying anything:
    `SLACK_APP_TOKEN`, and `OPENAI_API_KEY`. Add `OPENAI_API_BASE` and
    `OPENAI_API_MODEL` for a compatible gateway. These tokens choose the Slack
    app and workspace; no app or workspace ID is built into the runtime.
-4. For historical archive tools, add `SLACK_ARCHIVE_MCP_URL` to that Secret.
-   A missing or invalid URL disables this adapter with a startup warning.
-   LiteLLM hostname detection is not used. The archive uses `OPENAI_API_KEY`.
+4. For unified gateway tools, add `LITELLM_MCP_ENABLED=true` to that Secret.
+   The endpoint derives as `/mcp` on `OPENAI_API_BASE`'s origin. Alternatively set
+   `LITELLM_MCP_URL` explicitly. The existing `OPENAI_API_KEY` determines which
+   servers/tools are available; discovery refreshes for each reply. Legacy
+   `SLACK_ARCHIVE_MCP_URL` remains a scoped-endpoint fallback. Unconfigured
+   gateway tools are disabled with a startup warning.
 5. Optionally supply `pwbot-slack-mcp` with `SLACK_APP_ID`, `SLACK_CLIENT_ID`,
    and `SLACK_CLIENT_SECRET`, all belonging to the same app as the bot token.
    Missing credentials disable live MCP with a startup warning. Do not copy

@@ -61,7 +61,7 @@ test("missing optional integrations select empty adapters without requesting cre
   expect(tools).toEqual([]);
 });
 
-test("an unavailable configured archive omits its tools rather than blocking replies", async () => {
+test("an unavailable configured gateway omits its tools rather than blocking replies", async () => {
   const server = Bun.serve({
     fetch: () => new Response(null, { status: 503 }),
     hostname: "127.0.0.1",
@@ -83,7 +83,7 @@ test("an unavailable configured archive omits its tools rather than blocking rep
         Effect.provide(ToolSourcesLive.pipe(Layer.provide(BotConfig.layer))),
         Effect.provideService(
           ConfigProvider.ConfigProvider,
-          provider({ SLACK_ARCHIVE_MCP_URL: `${server.url.origin}/mcp` })
+          provider({ LITELLM_MCP_URL: `${server.url.origin}/mcp` })
         )
       )
     );

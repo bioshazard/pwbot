@@ -28,14 +28,14 @@ test("archive requires an explicit URL even on a known gateway hostname", async 
   const config = await read({
     OPENAI_API_BASE: "http://litellm.ops.svc.cluster.local:4000/v1",
   });
-  expect(config.archiveUrl).toBeUndefined();
-  expect(config.archiveDisabledReason).toContain("SLACK_ARCHIVE_MCP_URL");
+  expect(config.gatewayMcpUrl).toBeUndefined();
+  expect(config.gatewayMcpDisabledReason).toContain("LITELLM_MCP");
   const local = await read({});
-  expect(local.archiveUrl).toBeUndefined();
+  expect(local.gatewayMcpUrl).toBeUndefined();
   const explicit = await read({
     SLACK_ARCHIVE_MCP_URL: "https://example.test/slack_archive/mcp",
   });
-  expect(explicit.archiveUrl?.href).toBe(
+  expect(explicit.gatewayMcpUrl?.href).toBe(
     "https://example.test/slack_archive/mcp"
   );
 });
@@ -47,13 +47,40 @@ test("missing, empty and invalid optional archive configuration disables the fea
     )
   );
   for (const config of configurations) {
-    expect(config.archiveUrl).toBeUndefined();
+    expect(config.gatewayMcpUrl).toBeUndefined();
   }
   const disabled = await read({
     SLACK_ARCHIVE_ENABLED: "false",
     SLACK_ARCHIVE_MCP_URL: "https://example.test/mcp",
   });
-  expect(disabled.archiveUrl).toBeUndefined();
+  expect(disabled.gatewayMcpUrl).toBeUndefined();
   const incomplete = await read({ SLACK_ARCHIVE_ENABLED: "true" });
-  expect(incomplete.archiveUrl).toBeUndefined();
+  expect(incomplete.gatewayMcpUrl).toBeUndefined();
+});
+
+test("unified gateway endpoint derives from the model origin only when opted in", async () => {
+  const enabled = await read({
+    LITELLM_MCP_ENABLED: "true",
+    OPENAI_API_BASE: "https://gateway.example.test/v1",
+    SLACK_ARCHIVE_MCP_URL: "https://old.example.test/slack_archive/mcp",
+  });
+  expect(enabled.gatewayMcpUrl?.href).toBe("https://gateway.example.test/mcp");
+  const explicit = await read({
+    LITELLM_MCP_URL: "https://another.example.test/shared/mcp",
+  });
+  expect(explicit.gatewayMcpUrl?.href).toBe(
+    "https://another.example.test/shared/mcp"
+  );
+  const disabled = await read({
+    LITELLM_MCP_ENABLED: "false",
+    LITELLM_MCP_URL: "https://gateway.example.test/mcp",
+    SLACK_ARCHIVE_MCP_URL: "https://old.example.test/mcp",
+  });
+  expect(disabled.gatewayMcpUrl).toBeUndefined();
+  const invalid = await read({
+    LITELLM_MCP_URL: "not a URL",
+    SLACK_ARCHIVE_MCP_URL: "https://old.example.test/mcp",
+  });
+  expect(invalid.gatewayMcpUrl).toBeUndefined();
+  expect(invalid.gatewayMcpDisabledReason).toContain("LITELLM_MCP_URL");
 });
