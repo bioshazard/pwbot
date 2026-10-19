@@ -1,2 +1,14 @@
-node_modules
+node_modules/
 .env*
+!.env.example
+log.out
+pwbot.sqlite
+pwbot.sqlite-*
+.slack-mcp/
+
+# Private operational notes and state, including custom SQLite filenames.
+.local/
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*

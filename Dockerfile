@@ -1,15 +1,20 @@
-# https://bun.sh/guides/ecosystem/docker
-# https://hub.docker.com/r/oven/bun
-
-FROM oven/bun:latest
+FROM oven/bun:1.3.14 AS dependencies
 
 WORKDIR /app
-
-COPY package.json ./
-COPY bun.lock ./
+COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile --production
-COPY . .
 
-# run the app
+FROM oven/bun:1.3.14
+
+WORKDIR /app
+COPY --from=dependencies /app/node_modules ./node_modules
+COPY --chown=bun:bun package.json main.ts slack.ts reply.ts ./
+COPY --chown=bun:bun lib ./lib
+
+RUN mkdir -p /data && chown bun:bun /app /data
+
+ENV DATABASE_PATH=/data/pwbot.sqlite
+ENV SLACK_MCP_CREDENTIALS_DIR=/data/slack-mcp
+
 USER bun
-ENTRYPOINT [ "bun", "run", "main.ts" ]
+CMD ["bun", "main.ts"]

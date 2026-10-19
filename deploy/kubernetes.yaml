@@ -1,0 +1,74 @@
+# Example only. Select a namespace and replace this image with a published digest.
+# Supply pwbot-secrets separately; never put credential values in this file.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pwbot-data
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pwbot
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: pwbot
+  template:
+    metadata:
+      labels:
+        app: pwbot
+    spec:
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: pwbot
+          image: pwbot:release
+          envFrom:
+            - secretRef:
+                name: pwbot-secrets
+            - secretRef:
+                name: pwbot-slack-mcp
+                optional: true
+          env:
+            - name: DATABASE_PATH
+              value: /data/pwbot.sqlite
+            - name: SLACK_MCP_CREDENTIALS_DIR
+              value: /data/slack-mcp
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: pwbot-data
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
