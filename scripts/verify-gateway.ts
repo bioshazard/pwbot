@@ -69,7 +69,9 @@ const program = Effect.gen(function* verifyGateway() {
 }).pipe(
   Effect.scoped,
   Effect.mapError(() => new ReplyError({ reason: "model" })),
-  Effect.provide(GatewayMcp.layer.pipe(Layer.provideMerge(BotConfig.layer)))
+  Effect.provide(
+    GatewayMcp.layer.pipe(Layer.provideMerge(BotConfig.resolvedLayer))
+  )
 );
 
 BunRuntime.runMain(program);
