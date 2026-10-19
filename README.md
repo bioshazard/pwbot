@@ -50,7 +50,7 @@ Optional configuration:
 | `MODEL_CALL_TIMEOUT_MS` | `90000`, each model request including streaming |
 | `TOOL_CALL_TIMEOUT_MS` | `30000`, each tool execution |
 | `OPENAI_MAX_TOKENS` | `4096` |
-| `OPENAI_CONTEXT_WINDOW` | `32768`; set to actual gateway/model limit (including for dev) |
+| `OPENAI_CONTEXT_WINDOW` | Override; otherwise upstream metadata, then `8192` if unavailable |
 | `AGENT_MAX_TURNS` | `16` provider requests per reply |
 | `AGENT_MAX_TOOL_CALLS` | `48` attempted tools per reply, including invalid calls |
 | `DEBUG` | `false`; set `1` for correlated reply lifecycle/tool/stage diagnostics |
@@ -83,8 +83,15 @@ Release one of issue #4 covers bounded in-process replies and progress. The
 posting use their transport defaults. Model requests have a separate 90-second
 wall-clock limit; tool executions have a 30-second limit. MCP discovery/calls also
 retain the SDK's 30-second limit, so raising the tool limit cannot extend MCP's
-own deadline. The first limit reached wins. Configure `OPENAI_CONTEXT_WINDOW` to
-match the actual model behind the gateway alias. Pi estimates input size and reserves
+own deadline. The first limit reached wins. An explicit `OPENAI_CONTEXT_WINDOW`
+override wins; otherwise startup checks `/model/info`, then the model API's
+`models` endpoint for the selected alias. Metadata lookup is limited to three
+seconds total. Missing, invalid, inaccessible or timed-out metadata falls back to
+8192 tokens with a warning. Multiple deployments sharing an alias use the smallest
+announced capacity; an unknown capacity prevents inference. Output-only limits
+are not treated as context capacity. Startup logs the resolved capacity and source;
+restart to refresh metadata after changing the upstream alias. `OPENAI_MAX_TOKENS`
+remains a separate 4096-token reply policy. Pi estimates input size and reserves
 4096 safety tokens, then clamps the request's output budget to remaining context.
 Before sending, the bot requires room for at least `min(OPENAI_MAX_TOKENS, 1024)`
 answer tokens. Smaller budgets fail distinctly as context exhaustion instead of

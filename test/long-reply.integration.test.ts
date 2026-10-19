@@ -79,6 +79,7 @@ test("multi-step research completes after two minutes within its configured dead
             MODEL_CALL_TIMEOUT_MS: "60000",
             OPENAI_API_BASE: `${server.url.origin}/v1`,
             OPENAI_API_KEY: "test-key",
+            OPENAI_CONTEXT_WINDOW: "16384",
             OPENAI_TIMEOUT_MS: "140000",
           })
         )

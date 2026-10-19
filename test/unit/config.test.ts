@@ -110,3 +110,14 @@ test("DEBUG=1 enables dev tracing; default and zero keep it disabled", async () 
   expect(enabled.debug).toBe(true);
   expect(disabled.debug).toBe(false);
 });
+
+test("context defaults to 8192 and explicit overrides must be positive integers", async () => {
+  const defaults = await read({});
+  const override = await read({ OPENAI_CONTEXT_WINDOW: "64000" });
+  expect(defaults.contextWindow).toBe(8192);
+  expect(defaults.contextWindowSource).toBe("fallback");
+  expect(override.contextWindow).toBe(64_000);
+  expect(override.contextWindowSource).toBe("override");
+  await expect(read({ OPENAI_CONTEXT_WINDOW: "0" })).rejects.toBeDefined();
+  await expect(read({ OPENAI_CONTEXT_WINDOW: "1.5" })).rejects.toBeDefined();
+});

@@ -1,5 +1,6 @@
 import { Config, Context, Effect, Layer, Option, Schema } from "effect";
 
+import { fallbackContextWindow, resolveModelContext } from "./model-context";
 import { optionalText } from "./optional-config";
 
 const positiveInt = (name: string, fallback: number) =>
@@ -63,11 +64,21 @@ const make = Effect.gen(function* readConfig() {
     Config.withDefault(new URL("https://api.openai.com/v1"))
   );
   const gateway = yield* readGatewayMcpConfig(baseUrl);
+  const contextWindowOverride = yield* Config.schema(
+    Schema.Int.check(Schema.isGreaterThan(0)),
+    "OPENAI_CONTEXT_WINDOW"
+  ).pipe(Config.option);
   return {
     apiKey: yield* Config.Redacted("OPENAI_API_KEY"),
     ...gateway,
     baseUrl: baseUrl.href.replace(/\/$/u, ""),
-    contextWindow: yield* positiveInt("OPENAI_CONTEXT_WINDOW", 32_768),
+    contextWindow: Option.getOrElse(
+      contextWindowOverride,
+      () => fallbackContextWindow
+    ),
+    contextWindowSource: Option.isSome(contextWindowOverride)
+      ? ("override" as const)
+      : ("fallback" as const),
     databasePath: yield* Config.NonEmptyString("DATABASE_PATH").pipe(
       Config.withDefault("pwbot.sqlite")
     ),
@@ -86,9 +97,11 @@ const make = Effect.gen(function* readConfig() {
     toolTimeoutMs: yield* positiveInt("TOOL_CALL_TIMEOUT_MS", 30_000),
   };
 });
+const resolved = make.pipe(Effect.flatMap(resolveModelContext));
 export class BotConfig extends Context.Service<
   BotConfig,
-  Effect.Success<typeof make>
+  Effect.Success<typeof resolved>
 >()("pwbot/Config") {
   static readonly layer = Layer.effect(BotConfig, make);
+  static readonly resolvedLayer = Layer.effect(BotConfig, resolved);
 }

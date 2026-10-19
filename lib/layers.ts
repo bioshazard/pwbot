@@ -52,4 +52,6 @@ export const ToolSourcesLive = Layer.effect(
 ).pipe(Layer.provide(Layer.mergeAll(GatewayMcp.layer, LiveSlackServices)));
 const ServicesLive = Layer.mergeAll(StorageLive, ToolSourcesLive);
 const RepliesLive = Replies.layer.pipe(Layer.provideMerge(ServicesLive));
-export const AppLive = RepliesLive.pipe(Layer.provideMerge(BotConfig.layer));
+export const AppLive = RepliesLive.pipe(
+  Layer.provideMerge(BotConfig.resolvedLayer)
+);

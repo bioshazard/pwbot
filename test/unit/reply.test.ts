@@ -107,6 +107,7 @@ test("Pi executes karma through the real OpenAI-compatible wire protocol", async
             OPENAI_API_BASE: `${server.url.origin}/v1`,
             OPENAI_API_KEY: "test-key",
             OPENAI_API_MODEL: "test-model",
+            OPENAI_CONTEXT_WINDOW: "16384",
           })
         )
       )
@@ -362,6 +363,7 @@ test("overall deadline is distinct from an individual call timeout", async () =>
               MODEL_CALL_TIMEOUT_MS: "1000",
               OPENAI_API_BASE: `${server.url.origin}/v1`,
               OPENAI_API_KEY: "test-key",
+              OPENAI_CONTEXT_WINDOW: "16384",
               OPENAI_TIMEOUT_MS: "20",
             })
           )
@@ -455,6 +457,58 @@ test("the same large research context completes with an accurately configured wi
     });
     expect(text).toBe("Research complete.");
     expect(budgets).toEqual([config.maxTokens, config.maxTokens]);
+  } finally {
+    await server.stop(true);
+  }
+});
+
+test("replies resolve announced capacity once and retain their configured output budget", async () => {
+  let metadataRequests = 0;
+  const budgets: number[] = [];
+  const server = Bun.serve({
+    fetch: async (request) => {
+      if (new URL(request.url).pathname === "/model/info") {
+        metadataRequests += 1;
+        return Response.json({
+          data: [
+            {
+              model_info: { max_input_tokens: 64_000 },
+              model_name: "test-model",
+            },
+          ],
+        });
+      }
+      const payload = Schema.decodeUnknownSync(
+        Schema.Struct({ max_tokens: Schema.Number })
+      )(await request.json());
+      budgets.push(payload.max_tokens);
+      return stream({ content: "Complete." }, "stop");
+    },
+    hostname: "127.0.0.1",
+    port: 0,
+  });
+  try {
+    await Effect.runPromise(
+      Replies.use((replies) =>
+        Effect.gen(function* verifyResolvedModel() {
+          yield* replies.generate("Synthetic question", "UTEST");
+          yield* replies.generate("Another synthetic question", "UTEST");
+        })
+      ).pipe(
+        Effect.provide(AppLive),
+        Effect.provideService(
+          ConfigProvider.ConfigProvider,
+          ConfigProvider.fromUnknown({
+            DATABASE_PATH: ":memory:",
+            OPENAI_API_BASE: `${server.url.origin}/v1`,
+            OPENAI_API_KEY: "test-key",
+            OPENAI_API_MODEL: "test-model",
+          })
+        )
+      )
+    );
+    expect(metadataRequests).toBe(1);
+    expect(budgets).toEqual([4096, 4096]);
   } finally {
     await server.stop(true);
   }
