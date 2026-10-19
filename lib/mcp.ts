@@ -3,7 +3,7 @@ import { Type } from "@earendil-works/pi-ai";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
-import { Effect, Schema } from "effect";
+import { Effect, Option, Schema } from "effect";
 
 import packageJson from "../package.json";
 
@@ -84,8 +84,16 @@ export const makeMcpSession = Effect.fn("Mcp.open")(function* openMcp(
                     timeout: 30_000,
                   }
                 )
-                .catch(() => {
-                  throw new Error("MCP request failed");
+                // oxlint-disable-next-line anti-slop/no-unknown-parameters -- External SDK rejection is parsed immediately.
+                .catch((error: unknown) => {
+                  const parsed = Schema.decodeUnknownOption(
+                    Schema.Struct({ code: Schema.Number })
+                  )(error);
+                  throw new Error(
+                    Option.isSome(parsed) && parsed.value.code === -32_602
+                      ? "MCP arguments rejected; check the advertised input schema and correct required fields, types and allowed values before retrying"
+                      : "MCP source unavailable; try a narrower request or report the source unavailable"
+                  );
                 });
               if (result.isError === true) {
                 throw new TypeError(

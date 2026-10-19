@@ -71,16 +71,19 @@ const make = Effect.gen(function* readConfig() {
     databasePath: yield* Config.NonEmptyString("DATABASE_PATH").pipe(
       Config.withDefault("pwbot.sqlite")
     ),
+    debug: yield* Config.Boolean("DEBUG").pipe(Config.withDefault(false)),
     maxTokens: yield* positiveInt("OPENAI_MAX_TOKENS", 4096),
-    maxToolCalls: yield* positiveInt("AGENT_MAX_TOOL_CALLS", 24),
-    maxTurns: yield* positiveInt("AGENT_MAX_TURNS", 8),
+    maxToolCalls: yield* positiveInt("AGENT_MAX_TOOL_CALLS", 48),
+    maxTurns: yield* positiveInt("AGENT_MAX_TURNS", 16),
     model: yield* Config.NonEmptyString("OPENAI_API_MODEL").pipe(
       Config.withDefault("gpt-4o")
     ),
+    modelTimeoutMs: yield* positiveInt("MODEL_CALL_TIMEOUT_MS", 90_000),
     pollCommand: yield* Config.NonEmptyString("POLL_COMMAND").pipe(
       Config.withDefault("/pwpoll")
     ),
-    timeoutMs: yield* positiveInt("OPENAI_TIMEOUT_MS", 120_000),
+    timeoutMs: yield* positiveInt("OPENAI_TIMEOUT_MS", 600_000),
+    toolTimeoutMs: yield* positiveInt("TOOL_CALL_TIMEOUT_MS", 30_000),
   };
 });
 export class BotConfig extends Context.Service<

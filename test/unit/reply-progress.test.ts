@@ -87,3 +87,62 @@ test("missing reaction permission still allows the reply", async () => {
   expect(completed).toBe(true);
   expect(events).toEqual(["posted", "remove:eyes"]);
 });
+
+test("research and composition follow execution signals and suppress repeated updates", async () => {
+  const { events, reactions } = fixture();
+  await Effect.runPromise(
+    withReplyProgress(reactions, target, (progress) =>
+      Effect.promise(async () => {
+        await progress("researching");
+        await progress("researching");
+        await progress("composing");
+        await progress("researching");
+        events.push("posted");
+        return true;
+      })
+    )
+  );
+  expect(events).toEqual([
+    "add:eyes",
+    "add:mag",
+    "remove:mag",
+    "add:writing_hand",
+    "remove:writing_hand",
+    "add:mag",
+    "posted",
+    "add:white_check_mark",
+    "remove:mag",
+    "remove:writing_hand",
+    "remove:eyes",
+  ]);
+});
+
+test("cancellation waits for pending status then cleans up and ignores late signals", async () => {
+  const { events, reactions } = fixture();
+  let lateProgress:
+    | ((stage: "researching" | "composing") => Promise<void>)
+    | undefined;
+  await Effect.runPromiseExit(
+    withReplyProgress(
+      {
+        ...reactions,
+        add: async (item) => {
+          if (item.name === "mag") {
+            await Bun.sleep(30);
+          }
+          return await reactions.add(item);
+        },
+      },
+      target,
+      (progress) => {
+        lateProgress = progress;
+        return Effect.promise(async () => {
+          await progress("researching");
+          return true;
+        }).pipe(Effect.andThen(Effect.never));
+      }
+    ).pipe(Effect.timeout(10))
+  );
+  await lateProgress?.("composing");
+  expect(events).toEqual(["add:eyes", "add:mag", "remove:mag", "remove:eyes"]);
+});
