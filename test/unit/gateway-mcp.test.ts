@@ -28,6 +28,7 @@ test("MCP discovers gateway-prefixed schemas and preserves generation/citations"
   const headers: (string | null)[] = [];
   const calledTools: string[] = [];
   let includeNewServer = false;
+  let errorMode: "arguments" | "source" | undefined;
   const result = {
     content: [{ text: "snapshot evidence", type: "text" }],
     structuredContent: { citations: ["slack://C1/123"], generation: "g1" },
@@ -49,6 +50,16 @@ test("MCP discovers gateway-prefixed schemas and preserves generation/citations"
       };
       if (rpc.method === "tools/call" && rpc.params?.name !== undefined) {
         calledTools.push(rpc.params.name);
+        if (errorMode !== undefined) {
+          return Response.json({
+            error: {
+              code: errorMode === "arguments" ? -32_602 : -32_603,
+              message: "private upstream payload",
+            },
+            id: rpc.id,
+            jsonrpc: "2.0",
+          });
+        }
       }
       const pageNames =
         rpc.params?.cursor === undefined
@@ -137,6 +148,19 @@ test("MCP discovers gateway-prefixed schemas and preserves generation/citations"
             await books.execute("books-test", { query: "a book" }, signal)
         );
         expect(calledTools).toEqual(["slack_archive-search", "books-query"]);
+        for (const mode of ["arguments", "source"] as const) {
+          errorMode = mode;
+          yield* Effect.promise(async () => {
+            await expect(
+              search.execute("bad-call", { query: "synthetic" })
+            ).rejects.toThrow(
+              mode === "arguments"
+                ? "MCP arguments rejected; check the advertised input schema and correct required fields, types and allowed values before retrying"
+                : "MCP source unavailable; try a narrower request or report the source unavailable"
+            );
+          });
+        }
+        errorMode = undefined;
         // A later reply discovers new grants without an application allowlist or restart.
         includeNewServer = true;
         const nextSession = yield* gateway.open;

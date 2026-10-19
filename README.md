@@ -2,9 +2,11 @@
 
 Socket Mode Slack bot: DMs, mentions, karma, and polls.
 
-DMs and mentions receive 👀 before thread retrieval and generation. After a
-successful reply posts, the bot adds ✅ and removes 👀. Failure responses clear
-👀 without marking success. Reaction errors never prevent replies. Grant the
+DMs and mentions receive 👀 before thread retrieval and generation. Tool execution
+adds 🔍; streamed answer text switches to ✍️. Research may resume after text.
+Repeated stages do not repeat reaction calls. After a successful reply posts, the
+bot adds ✅. Every terminal path removes active reactions; failure responses do
+not mark success. Reaction errors never prevent replies. Grant the
 bot `reactions:write` and reinstall the Slack app after updating its manifest.
 The bot ignores its own reactions when updating karma.
 
@@ -44,11 +46,14 @@ Optional configuration:
 | --- | --- |
 | `OPENAI_API_BASE` | `https://api.openai.com/v1` |
 | `OPENAI_API_MODEL` | `gpt-4o` |
-| `OPENAI_TIMEOUT_MS` | `120000`, whole reply including tools |
+| `OPENAI_TIMEOUT_MS` | `600000`, discovery and the entire agent run |
+| `MODEL_CALL_TIMEOUT_MS` | `90000`, each model request including streaming |
+| `TOOL_CALL_TIMEOUT_MS` | `30000`, each tool execution |
 | `OPENAI_MAX_TOKENS` | `4096` |
-| `OPENAI_CONTEXT_WINDOW` | `32768`; set to actual model limit |
-| `AGENT_MAX_TURNS` | `8` provider requests per reply |
-| `AGENT_MAX_TOOL_CALLS` | `24` executed tools per reply |
+| `OPENAI_CONTEXT_WINDOW` | `32768`; set to actual gateway/model limit (including for dev) |
+| `AGENT_MAX_TURNS` | `16` provider requests per reply |
+| `AGENT_MAX_TOOL_CALLS` | `48` attempted tools per reply, including invalid calls |
+| `DEBUG` | `false`; set `1` for correlated reply lifecycle/tool/stage diagnostics |
 | `DATABASE_PATH` | `pwbot.sqlite` |
 | `POLL_COMMAND` | `/pwpoll` |
 | `LITELLM_MCP_ENABLED` | Unset; `true` derives `/mcp` from the model gateway origin, `false` disables gateway tools |
@@ -70,6 +75,72 @@ messages. `bun run test:greeting` explicitly opts into a real completion using
 `.env.dev`, with an in-memory database. It does not send a Slack message. `bun run verify:gateway` uses explicitly supplied
 environment configuration to check read-only archive status and a model-driven
 karma call against an in-memory fixture, without loading dotenv or writing Slack.
+
+## Long replies and recovery
+
+Release one of issue #4 covers bounded in-process replies and progress. The
+10-minute deadline includes discovery and generation; thread retrieval and Slack
+posting use their transport defaults. Model requests have a separate 90-second
+wall-clock limit; tool executions have a 30-second limit. MCP discovery/calls also
+retain the SDK's 30-second limit, so raising the tool limit cannot extend MCP's
+own deadline. The first limit reached wins. Configure `OPENAI_CONTEXT_WINDOW` to
+match the actual model behind the gateway alias. Pi estimates input size and reserves
+4096 safety tokens, then clamps the request's output budget to remaining context.
+Before sending, the bot requires room for at least `min(OPENAI_MAX_TOKENS, 1024)`
+answer tokens. Smaller budgets fail distinctly as context exhaustion instead of
+silently requesting a one-token answer. `DEBUG=1` logs configured/effective output
+budgets for each request. A provider's `length` stop remains output exhaustion;
+it is not automatically retried because tool arguments may be incomplete. Tool
+batches that exceed the remaining budget stop before executing that batch. Sixteen turns and 48 attempted calls
+allow multi-step research while bounding repeated invalid requests. Narrow the
+question or explicitly raise the relevant limit when a legitimate run exhausts it.
+
+Deadline, model stall, tool stall, output-token exhaustion, research budget
+exhaustion and upstream failure produce distinct safe outcomes. Raw upstream errors never enter logs or failure
+replies. With `DEBUG=1`, correlated diagnostics record the original
+channel/message/thread IDs, discovery, tool starts/completion, progress stages,
+delivery, cleanup, model
+duration, stop reason, token counts and call count. Message bodies and tool
+arguments/results are excluded. Set `DEBUG=1` in `.env.dev` and restart the process
+after changing it. Upstream error diagnostics retain only a fixed category and
+numeric HTTP status; error text is discarded. MCP argument rejection gives
+schema-oriented correction guidance without echoing private error payloads. Partial findings are not published on failure;
+they may be incomplete. Cancellation is currently process shutdown or scoped
+interruption; there is no user cancellation command. It aborts supported SDK work,
+blocks further calls, and clears active reactions. An SDK that ignores abort may
+continue its in-flight operation; the bot does not wait indefinitely for it.
+
+Bolt acknowledges ordinary Events API messages before invoking listeners
+(verified against the installed `App.processEvent` implementation). That transport
+acknowledgement does not mean the reply completed or that work is durable. Event
+claims suppress duplicates while work is active and after successful handling;
+failed/interrupted handlers release their claims. Concurrent replies run
+independently; there is no global concurrency cap or per-thread queue yet.
+
+No durable job queue is included in this release. A hard crash can leave a claimed
+event without a reply or leave an active reaction behind. On restart, work is not
+resumed; do not replay events or clear claims blindly. Check the original thread
+for delivery, remove a stale bot status reaction if needed, then submit a fresh
+request. A crash after posting but before recording completion can cause a retry
+to post a duplicate. No exactly-once delivery guarantee is made.
+
+Before a durable-job release, persist a job ID/event ID, original thread and
+explicit queued/running/ready/delivering/delivered/failed/cancelled state in SQLite
+before announcing acceptance. Add unique event constraints, bounded workers and
+per-thread ordering. Recovery must mark interrupted model/tool work as failed or
+ambiguous; never automatically replay tools whose side effects are unknown.
+Persist the result before delivery, and reconcile jobs found in delivering state
+against Slack before deciding whether to resend. If delivery cannot be verified,
+retain an ambiguous state for operator action. Test crashes during calls and on
+both sides of Slack posting/state commits before enabling automatic recovery.
+
+Fast checks use `bun run test`. An explicit local-only wall-clock check runs three
+41-second model turns and completes after two minutes without using credentials
+or posting Slack messages:
+
+```sh
+bun --no-env-file test test/long-reply.integration.test.ts
+```
 
 ## Tools and MCP gateway
 

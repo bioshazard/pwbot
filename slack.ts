@@ -11,7 +11,7 @@ import {
 } from "effect";
 
 import { BotConfig } from "./lib/config";
-import { SlackError } from "./lib/errors";
+import { replyFailureText, SlackError } from "./lib/errors";
 import {
   parsePollCommand,
   parsePollMetadata,
@@ -20,6 +20,7 @@ import {
   renderPoll,
 } from "./lib/poll-ui";
 import type { Poll } from "./lib/poll-ui";
+import { makeReplyDebug } from "./lib/reply-debug";
 import { withReplyProgress } from "./lib/reply-progress";
 import {
   ActionBodySchema,
@@ -182,77 +183,108 @@ export const SlackLive = Layer.effectDiscard(
         return;
       }
       const userId = event.user;
+      const requestId = `${event.channel}:${event.ts}`;
+      const debug = makeReplyDebug(config.debug, requestId);
+      debug("accepted", {
+        channelId: event.channel,
+        messageTs: event.ts,
+        threadTs: event.thread_ts ?? event.ts,
+      });
       return yield* withReplyProgress(
         {
           add: async (target) => await app.client.reactions.add(target),
           remove: async (target) => await app.client.reactions.remove(target),
         },
         { channel: event.channel, timestamp: event.ts },
-        Effect.gen(function* generateAndPostReply() {
-          const lines: string[] = [];
-          let cursor: string | undefined;
-          let pages = 0;
-          do {
-            const currentCursor = cursor;
-            const response = yield* call(
-              "conversations.replies",
+        (onProgress) =>
+          Effect.gen(function* generateAndPostReply() {
+            debug("thread_loading");
+            const lines: string[] = [];
+            let cursor: string | undefined;
+            let pages = 0;
+            do {
+              const currentCursor = cursor;
+              const response = yield* call(
+                "conversations.replies",
+                async () =>
+                  await app.client.conversations.replies({
+                    channel: event.channel,
+                    cursor: currentCursor,
+                    limit: 100,
+                    ts: event.thread_ts ?? event.ts,
+                  })
+              );
+              for (const message of response.messages ?? []) {
+                const parsed =
+                  yield* Schema.decodeUnknownEffect(ThreadMessage)(message);
+                lines.push(
+                  `${parsed.user === undefined ? "unknown" : `<@${parsed.user}>`}: ${parsed.text ?? ""}`
+                );
+              }
+              cursor = response.response_metadata?.next_cursor;
+            } while (
+              cursor !== undefined &&
+              cursor.length > 0 &&
+              (pages += 1) < 10
+            );
+            const thread =
+              lines.join("\n").slice(-48_000) || `${event.user}: ${event.text}`;
+            debug("thread_loaded", {
+              messages: lines.length,
+              threadChars: thread.length,
+            });
+            const result = yield* replies
+              .generate(thread, userId, {
+                channelId: event.channel,
+                debug,
+                onProgress,
+                requestId,
+                teamId,
+                threadTs: event.thread_ts ?? event.ts,
+              })
+              .pipe(
+                Effect.map((text) => ({ completed: true, text })),
+                Effect.catchTag("ReplyError", (error) =>
+                  Effect.logWarning("Reply failed", {
+                    reason: error.reason,
+                    requestId,
+                  }).pipe(
+                    Effect.as({
+                      completed: false,
+                      text: replyFailureText(error.reason),
+                    })
+                  )
+                )
+              );
+            debug("posting", { completed: result.completed });
+            yield* call(
+              "chat.postMessage",
               async () =>
-                await app.client.conversations.replies({
+                await postMessage({
                   channel: event.channel,
-                  cursor: currentCursor,
-                  limit: 100,
-                  ts: event.thread_ts ?? event.ts,
+                  mrkdwn: true,
+                  text: result.text,
+                  thread_ts: event.thread_ts ?? event.ts,
                 })
             );
-            for (const message of response.messages ?? []) {
-              const parsed =
-                yield* Schema.decodeUnknownEffect(ThreadMessage)(message);
-              lines.push(
-                `${parsed.user === undefined ? "unknown" : `<@${parsed.user}>`}: ${parsed.text ?? ""}`
-              );
-            }
-            cursor = response.response_metadata?.next_cursor;
-          } while (
-            cursor !== undefined &&
-            cursor.length > 0 &&
-            (pages += 1) < 10
-          );
-          const thread =
-            lines.join("\n").slice(-48_000) || `${event.user}: ${event.text}`;
-          const result = yield* replies
-            .generate(thread, userId, {
-              channelId: event.channel,
-              teamId,
-              threadTs: event.thread_ts ?? event.ts,
-            })
-            .pipe(
-              Effect.map((text) => ({ completed: true, text })),
-              Effect.catchTag("ReplyError", (error) =>
-                Effect.logWarning("Reply failed", {
-                  reason: error.reason,
-                }).pipe(
-                  Effect.as({
-                    completed: false,
-                    text: "Sorry — the reply service is temporarily unavailable. Please try again.",
-                  })
-                )
-              )
-            );
-          yield* call(
-            "chat.postMessage",
-            async () =>
-              await postMessage({
-                channel: event.channel,
-                mrkdwn: true,
-                text: result.text,
-                thread_ts: event.thread_ts ?? event.ts,
-              })
-          );
-          yield* Effect.logInfo("Posted reply", {
-            completed: result.completed,
-          });
-          return result.completed;
-        })
+            debug("delivered", { completed: result.completed });
+            yield* Effect.logInfo("Posted reply", {
+              completed: result.completed,
+              requestId,
+            });
+            return result.completed;
+          })
+      ).pipe(
+        Effect.onExit((exit) =>
+          Effect.sync(() => {
+            debug("finished", {
+              outcome: Exit.isSuccess(exit)
+                ? "handled"
+                : "interrupted_or_failed",
+              progressCleanupFinished: true,
+            });
+          })
+        )
       );
     });
     app.message(async ({ message, body }) => {
@@ -524,6 +556,7 @@ export const SlackLive = Layer.effectDiscard(
     yield* call("start", async () => await app.start());
     yield* Effect.logInfo("PW Bot is running", {
       botUserId,
+      debugEnabled: config.debug,
       gatewayMcpEnabled: Boolean(config.gatewayMcpUrl),
     });
   })

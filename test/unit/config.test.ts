@@ -84,3 +84,29 @@ test("unified gateway endpoint derives from the model origin only when opted in"
   expect(invalid.gatewayMcpUrl).toBeUndefined();
   expect(invalid.gatewayMcpDisabledReason).toContain("LITELLM_MCP_URL");
 });
+
+test("research defaults and call deadlines are positive and independently configurable", async () => {
+  const defaults = await read({});
+  expect(defaults.timeoutMs).toBe(600_000);
+  expect(defaults.modelTimeoutMs).toBe(90_000);
+  expect(defaults.toolTimeoutMs).toBe(30_000);
+  expect(defaults.maxTurns).toBe(16);
+  expect(defaults.maxToolCalls).toBe(48);
+  const overrides = await read({
+    MODEL_CALL_TIMEOUT_MS: "100",
+    TOOL_CALL_TIMEOUT_MS: "200",
+  });
+  expect(overrides.modelTimeoutMs).toBe(100);
+  expect(overrides.toolTimeoutMs).toBe(200);
+  await expect(read({ MODEL_CALL_TIMEOUT_MS: "0" })).rejects.toBeDefined();
+  await expect(read({ TOOL_CALL_TIMEOUT_MS: "-1" })).rejects.toBeDefined();
+});
+
+test("DEBUG=1 enables dev tracing; default and zero keep it disabled", async () => {
+  const defaults = await read({});
+  const enabled = await read({ DEBUG: "1" });
+  const disabled = await read({ DEBUG: "0" });
+  expect(defaults.debug).toBe(false);
+  expect(enabled.debug).toBe(true);
+  expect(disabled.debug).toBe(false);
+});
